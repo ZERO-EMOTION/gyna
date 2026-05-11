@@ -1,0 +1,15 @@
+MetaTrader5
+langgraph
+langchain
+langchain-openai
+langchain-anthropic
+langchain-community
+qdrant-client
+sentence-transformers
+pandas
+numpy
+ta
+python-dotenv
+schedule
+python-telegram-bot
+streamlit
