@@ -338,10 +338,13 @@ class GynaSystemOrchestrator:
         now = time.time()
 
         # ── Entry guards ───────────────────────────────────────────────────
+        log.info(f"[BAR] positions={len(self.cached_positions)} max={MAX_OPEN_POSITIONS}")
         if len(self.cached_positions) >= MAX_OPEN_POSITIONS:
+            log.warning("[BAR] BLOCKED: max positions")
             return
 
         if now - self.last_entry_ts < MIN_COOLDOWN_S:
+            log.warning(f"[BAR] BLOCKED: cooldown {now - self.last_entry_ts:.0f}s / {MIN_COOLDOWN_S}s")
             return
 
         # ── Kill hours ─────────────────────────────────────────────────────
@@ -364,8 +367,9 @@ class GynaSystemOrchestrator:
 
         # ── OHLCV data ─────────────────────────────────────────────────────
         rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, 250)
+        log.info(f"[BAR] rates={'None' if rates is None else len(rates)} bars")
         if rates is None or len(rates) < 200:
-            log.error("[BAR] Insufficient M15 bars")
+            log.error("[BAR] BLOCKED: insufficient bars")
             return
 
         import pandas as pd
