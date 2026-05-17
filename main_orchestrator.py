@@ -60,8 +60,8 @@ LOOP_CADENCE_S           = 0.050   # 50ms tick frame
 POSITION_CACHE_INTERVAL  = 0.250   # 250ms position poll throttle
 HEARTBEAT_INTERVAL       = 1.0     # 1Hz terminal watchdog
 MAX_FEED_STALENESS_S     = 60.0    # relaxed for BTCUSD
-MAX_SPREAD_POINTS        = 5000    # BTCUSD spread ceiling (raw points)
-MIN_COOLDOWN_S           = 300     # 5-min minimum between entries
+MAX_SPREAD_POINTS        = 3000   # BTCUSD aggressive spread filter
+MIN_COOLDOWN_S           = 180   # 3 min cooldown — BTC: fewer trades, higher quality
 OPTIMISTIC_TTL_S         = 2.0     # max time for optimistic position to propagate
 BAR_REGISTRY_RETENTION_S = 86400  # 24hr bar registry pruning
 SYMBOL                   = SYMBOLS[0]   # BTCUSD
@@ -75,7 +75,7 @@ class GynaSystemOrchestrator:
                                        if "system_state" in DB_PATH else "memory/gyna_trades.db")
         self.telemetry   = ExecutionTelemetry(tracking_window=20)
         self.analytics   = PostTradeValidationEngine(DB_PATH)
-        self.features    = FeatureEngine(SYMBOL, "M15")
+        self.features    = FeatureEngine(SYMBOL, "M1")
         self.edge        = EdgeEngine(fatigue_threshold_bars=48)
         self.allocator   = ClaudeAllocator()
         self.risk        = RiskEngine()
@@ -367,7 +367,7 @@ class GynaSystemOrchestrator:
             return
 
         # ── OHLCV data ─────────────────────────────────────────────────────
-        rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, 250)
+        rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M1, 0, 500)
         log.info(f"[BAR] rates={'None' if rates is None else len(rates)} bars")
         if rates is None or len(rates) < 200:
             log.error("[BAR] BLOCKED: insufficient bars")
