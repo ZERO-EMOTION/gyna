@@ -38,9 +38,16 @@ class ExecutionTelemetry:
                     "metrics": self._current_metrics()}
 
         # Latency
-        t_sent = authorized_order.get("timestamp_sent", time.time())
-        t_fill = broker_receipt.get("timestamp_fill", time.time())
-        latency = (t_fill - t_sent) * 1000.0   # ms
+        # Use perf_counter delta if available (sub-second precision)
+        # Fall back to wall-clock only for chronology, not latency
+        t_sent_perf = authorized_order.get("timestamp_sent_perf")
+        t_fill_perf = broker_receipt.get("timestamp_fill_perf")
+        if t_sent_perf is not None and t_fill_perf is not None:
+            latency = (t_fill_perf - t_sent_perf) * 1000.0  # ms — perf_counter precision
+        else:
+            t_sent = authorized_order.get("timestamp_sent", time.time())
+            t_fill = broker_receipt.get("timestamp_fill", time.time())
+            latency = (t_fill - t_sent) * 1000.0  # ms — wall-clock fallback
 
         # Slippage in points (positive = adverse)
         req_price  = float(authorized_order["order_parameters"]["execution_price"])
@@ -72,18 +79,28 @@ class ExecutionTelemetry:
 
     def _current_metrics(self) -> Dict[str, Any]:
         import numpy as np
-        avg_lat  = float(np.mean(self.latency_ms))   if self.latency_ms   else 0.0
-        avg_slip = float(np.mean(self.slippage_pts)) if self.slippage_pts else 0.0
 
-        # EQD: 0.0 = perfect, 0.5 = severe degradation
-        # Slippage component: 0–0.5 (based on 5-point threshold)
-        # Latency component:  0–0.5 (based on 250ms threshold)
-        slip_component = min(0.5, max(0.0, avg_slip) / 5.0 * 0.5)
-        lat_component  = min(0.5, max(0.0, avg_lat)  / 250.0 * 0.5)
+        lats = self.latency_ms   if self.latency_ms   else [0.0]
+        slips = self.slippage_pts if self.slippage_pts else [0.0]
+
+        avg_lat      = float(np.mean(lats))
+        avg_slip_raw = float(np.mean(slips))          # signed — preserves asymmetry info
+        avg_slip_adv = float(np.mean([max(0.0, s) for s in slips]))  # adverse only for EQD
+
+        # EQD: linear now, piecewise/exponential after telemetry calibration
+        # Slippage: adverse only (0–0.5 at 5pt threshold)
+        # Latency:  (0–0.5 at 250ms threshold)
+        slip_component = min(0.5, avg_slip_adv / 5.0 * 0.5)
+        lat_component  = min(0.5, avg_lat / 250.0 * 0.5)
         eqd            = round(slip_component + lat_component, 3)
 
+        # P95 latency for tail-risk awareness (available once window fills)
+        p95_lat = round(float(np.percentile(lats, 95)), 1) if len(lats) >= 5 else avg_lat
+
         return {
-            "rolling_avg_latency_ms":      round(avg_lat, 1),
-            "rolling_avg_slippage_points": round(avg_slip, 1),
+            "rolling_avg_latency_ms":        round(avg_lat, 1),
+            "p95_latency_ms":                p95_lat,
+            "rolling_avg_slippage_points":   round(avg_slip_adv, 1),
+            "raw_signed_slippage_points":    round(avg_slip_raw, 3),  # signed distribution
             "execution_quality_degradation": eqd,
         }
