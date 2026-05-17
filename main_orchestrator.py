@@ -356,8 +356,9 @@ class GynaSystemOrchestrator:
         # ── Market data ────────────────────────────────────────────────────
         sym_info = mt5.symbol_info(SYMBOL)
         account  = mt5.account_info()
+        log.info(f"[BAR] sym_info={'OK' if sym_info else 'NONE'} account={'OK' if account else 'NONE'}")
         if sym_info is None or account is None:
-            log.error("[BAR] Cannot fetch symbol/account info")
+            log.error("[BAR] BLOCKED: Cannot fetch symbol/account info")
             return
 
         # ── Spread firewall ────────────────────────────────────────────────
