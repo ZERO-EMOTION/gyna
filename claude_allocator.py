@@ -61,12 +61,14 @@ class GynAllocator:
     """
 
     def __init__(self):
-        self.provider   = os.getenv("LLM_PROVIDER", "groq").lower()
-        self.groq_key   = os.getenv("GROQ_API_KEY", "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")
-        self.claude_key = os.getenv("ANTHROPIC_API_KEY", "")
-        self.groq_model = "llama-3.3-70b-versatile"
+        self.provider     = os.getenv("LLM_PROVIDER", "ollama").lower()
+        self.groq_key     = os.getenv("GROQ_API_KEY", "")
+        self.claude_key   = os.getenv("ANTHROPIC_API_KEY", "")
+        self.ollama_url   = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        self.ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+        self.groq_model   = "llama-3.3-70b-versatile"
         self.claude_model = "claude-sonnet-4-20250514"
-        log.info(f"Allocator: provider={self.provider}")
+        log.info(f"Allocator: provider={self.provider} model={self.ollama_model if self.provider=='ollama' else ''}")
 
     def allocate_cycle(self,
                        masked_snapshot: Dict[str, Any],
@@ -85,7 +87,14 @@ class GynAllocator:
 
         # Try provider chain
         result = None
-        if self.provider == "groq" or not result:
+        if self.provider == "ollama":
+            result = self._call_ollama(payload, masked_snapshot)
+        elif self.provider == "groq" and self.groq_key:
+            result = self._call_groq(payload, masked_snapshot)
+        elif self.provider == "anthropic" and self.claude_key:
+            result = self._call_anthropic(payload, masked_snapshot)
+        # Fallback chain
+        if not result and self.groq_key:
             result = self._call_groq(payload, masked_snapshot)
         if not result and self.claude_key:
             result = self._call_anthropic(payload, masked_snapshot)
@@ -129,6 +138,38 @@ class GynAllocator:
 
         except Exception as e:
             log.warning(f"Groq failed: {e}")
+            return None
+
+    # ── Ollama (local) ────────────────────────────────────────────────────
+
+    def _call_ollama(self, payload: Dict, snap: Dict) -> Optional[Dict]:
+        try:
+            import urllib.request
+            body = json.dumps({
+                "model":  self.ollama_model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": f"Compute allocation:\n{json.dumps(payload, indent=2, default=str)}"}
+                ],
+                "stream": False,
+                "options": {"temperature": 0.0}
+            }).encode()
+
+            req = urllib.request.Request(
+                f"{self.ollama_url}/api/chat",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+
+            raw = data.get("message", {}).get("content", "").strip()
+            log.info(f"Ollama response received ({len(raw)} chars)")
+            return self._parse_and_verify(raw, snap, source="ollama")
+
+        except Exception as e:
+            log.warning(f"Ollama failed: {e}")
             return None
 
     # ── Anthropic ──────────────────────────────────────────────────────────
