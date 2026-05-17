@@ -30,10 +30,15 @@ from regime_engine import RegimeResult, classify_regime, rolling_regimes
 FEATURE_VERSION = "v1.1"
 
 # ── Risk envelopes (Claude suggests inside, RiskEngine clamps) ─────────────
+# BTCUSD M1 Production Risk Envelopes
+# SL: structure + ATR-relative (never fixed pip stops)
+# TP: asymmetric RR 1.5R minimum
+# ATR buffer: 0.50 x ATR14
+# BTC noise is too aggressive for tight stops
 RISK_ENVELOPES = {
-    "VOLATILE": {"sl_min": 1.5, "sl_max": 3.0, "tp_min": 2.0, "tp_max": 6.0},
-    "TREND":    {"sl_min": 1.0, "sl_max": 2.0, "tp_min": 2.0, "tp_max": 4.0},
-    "RANGE":    {"sl_min": 0.8, "sl_max": 1.5, "tp_min": 1.5, "tp_max": 3.0},
+    "TREND":    {"sl_min": 0.5, "sl_max": 1.0, "tp_min": 0.75, "tp_max": 2.0},  # 1.5R target
+    "VOLATILE": {"sl_min": 0.8, "sl_max": 1.5, "tp_min": 1.2,  "tp_max": 3.0},  # wider — BTC bursts
+    "RANGE":    {"sl_min": 0.5, "sl_max": 1.0, "tp_min": 0.75, "tp_max": 1.5},  # disabled later
 }
 
 # ── Sessions (UTC) ─────────────────────────────────────────────────────────
