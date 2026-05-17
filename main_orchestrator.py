@@ -604,7 +604,11 @@ class GynaSystemOrchestrator:
                         self.process_tick_telemetry(tick)
 
                     # Bar allocation (monotonic gate)
-                    if time.time() - self.last_allocation_ts >= bar_interval:
+                    elapsed = time.time() - self.last_allocation_ts
+                    if int(elapsed) % 5 == 0 and int(elapsed) > 0:
+                        log.info(f"[LOOP] Waiting for bar: {elapsed:.0f}s / {bar_interval:.0f}s | positions={len(self.cached_positions)}")
+                    if elapsed >= bar_interval:
+                        log.info("[LOOP] BAR CYCLE FIRING NOW")
                         self.process_bar_allocation_cycle()
                         self.last_allocation_ts = time.time()
 
