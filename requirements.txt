@@ -1,15 +1,34 @@
-MetaTrader5
-langgraph
-langchain
-langchain-openai
-langchain-anthropic
-langchain-community
-qdrant-client
-sentence-transformers
-pandas
-numpy
-ta
-python-dotenv
-schedule
-python-telegram-bot
-streamlit
+# Gyna — requirements.txt
+# Phase 1: Foundation
+# Phase 2+ will add: qdrant-client, sentence-transformers, anthropic
+
+# MT5
+MetaTrader5>=5.0.45
+
+# LangGraph + LangChain (Phase 2 brain)
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-anthropic>=0.3.0
+langchain-community>=0.3.0
+
+# Anthropic direct SDK (used in claude_brain.py Phase 2)
+anthropic>=0.40.0
+
+# Vector memory (Phase 2)
+qdrant-client>=1.9.0
+sentence-transformers>=3.0.0
+
+# Data
+pandas>=2.0.0
+numpy>=1.26.0
+ta>=0.11.0
+
+# Utilities
+python-dotenv>=1.0.0
+schedule>=1.2.0
+
+# Optional: Telegram notifications
+python-telegram-bot>=21.0
+
+# Optional: Dashboard
+streamlit>=1.35.0
