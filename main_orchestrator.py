@@ -476,16 +476,18 @@ class GynaSystemOrchestrator:
                       else mt5.symbol_info_tick(SYMBOL).bid)
 
         t_sent = time.time()
+        filling = self._get_filling_mode(SYMBOL)
+        log.info(f"[EXEC] Sending order: {order_type} {params['volume']}lot @ {price:.2f} filling={filling}")
         result = mt5.order_send({
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       SYMBOL,
             "volume":       float(params["volume"]),
             "type":         order_type,
             "price":        price,
-            "deviation":    10,
-            "sl":           0.0,   # stealth — no broker-side SL/TP
+            "deviation":    20,
+            "sl":           0.0,
             "tp":           0.0,
-            "type_filling": self._get_filling_mode(SYMBOL),
+            "type_filling": filling,
             "type_time":    mt5.ORDER_TIME_GTC,
             "comment":      f"Gyna:{snap.get('snapshot_hash','')[:8]}",
         })
@@ -576,13 +578,16 @@ class GynaSystemOrchestrator:
     # ── Filling mode ───────────────────────────────────────────────────────
 
     def _get_filling_mode(self, symbol: str) -> int:
-        info = mt5.symbol_info(symbol)
-        if info is None:
-            return mt5.ORDER_FILLING_FOK
-        modes = info.filling_mode
-        if modes & mt5.SYMBOL_FILLING_FOK:  return mt5.ORDER_FILLING_FOK
-        if modes & mt5.SYMBOL_FILLING_IOC:  return mt5.ORDER_FILLING_IOC
-        return mt5.ORDER_FILLING_RETURN
+        try:
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                return mt5.ORDER_FILLING_IOC
+            modes = info.filling_mode
+            if modes & mt5.SYMBOL_FILLING_FOK:  return mt5.ORDER_FILLING_FOK
+            if modes & mt5.SYMBOL_FILLING_IOC:  return mt5.ORDER_FILLING_IOC
+            return mt5.ORDER_FILLING_RETURN
+        except Exception:
+            return mt5.ORDER_FILLING_IOC
 
     # ── Main loop ──────────────────────────────────────────────────────────
 
