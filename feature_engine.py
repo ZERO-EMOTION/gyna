@@ -157,11 +157,11 @@ class FeatureEngine:
     Canonical market state generator for Gyna.
 
     Usage:
-        engine = FeatureEngine("BTCUSD", "M15")
+        engine = FeatureEngine("BTCUSD", "M1")
         snapshot = engine.generate_snapshot(df)   # dict, JSON-serializable
     """
 
-    def __init__(self, symbol: str = "BTCUSD", timeframe: str = "M15",
+    def __init__(self, symbol: str = "BTCUSD", timeframe: str = "M1",
                  feature_version: str = FEATURE_VERSION):
         self.symbol          = symbol
         self.timeframe       = timeframe
