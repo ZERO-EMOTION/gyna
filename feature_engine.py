@@ -41,7 +41,7 @@ def _determine_session(dt: datetime) -> str:
     dt_utc = dt.astimezone(timezone.utc)
     dow    = dt_utc.weekday()
     hour   = dt_utc.hour
-    if dow >= 5:                    return "WEEKEND"
+    if dow >= 5:                    return "ASIA"    # BTC 24/7 — weekend = Asia session
     if 0  <= hour <  7:             return "ASIA"
     if 7  <= hour < 12:             return "LONDON"
     if 12 <= hour < 17:             return "NY_OVERLAP"
