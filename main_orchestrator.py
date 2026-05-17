@@ -475,7 +475,8 @@ class GynaSystemOrchestrator:
         price      = (mt5.symbol_info_tick(SYMBOL).ask if direction == 1
                       else mt5.symbol_info_tick(SYMBOL).bid)
 
-        t_sent = time.time()
+        t_sent      = time.time()
+        t_sent_perf = time.perf_counter()
         filling = self._get_filling_mode(SYMBOL)
         log.info(f"[EXEC] Sending order: {order_type} {params['volume']}lot @ {price:.2f} filling={filling}")
         result = mt5.order_send({
