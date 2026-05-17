@@ -24,7 +24,7 @@ MODEL             = "claude-sonnet-4-20250514"
 
 # ── Trading ────────────────────────────────────────────────────────────────
 SYMBOLS        = ["BTCUSD"]
-TIMEFRAME_STR  = "M15"           # human-readable; mt5_bridge converts to mt5.TIMEFRAME_M15
+TIMEFRAME_STR  = "M1"            # M1 scalping
 BARS           = 200
 CYCLE_MINUTES  = 1               # M1 scalping
 
