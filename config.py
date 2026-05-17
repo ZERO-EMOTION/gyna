@@ -29,7 +29,7 @@ BARS           = 200
 CYCLE_MINUTES  = 15              # main loop interval
 
 # Kill hours (UTC) — empirically proven worst hours across fleet
-KILL_HOURS_UTC = [10, 17]
+KILL_HOURS_UTC = []
 
 # ── Risk Tiers ─────────────────────────────────────────────────────────────
 # (min_trades, min_win_rate, min_profit_factor) → risk_pct
