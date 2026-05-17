@@ -382,10 +382,14 @@ class GynaSystemOrchestrator:
         self.prune_bar_registry(current_bar_time)
 
         # ── Feature snapshot ───────────────────────────────────────────────
+        log.info(f"[BAR] Calling feature engine on {len(df)} bars...")
         try:
             snap = self.features.generate_snapshot(df)
+            log.info(f"[BAR] Feature snapshot OK: regime={snap.get('regime')} session={snap.get('session')}")
         except Exception as e:
-            log.error(f"[BAR] Feature engine error: {e}")
+            import traceback
+            log.error(f"[BAR] Feature engine CRASH: {e}")
+            log.error(traceback.format_exc())
             return
 
         # ── Performance memory ─────────────────────────────────────────────
