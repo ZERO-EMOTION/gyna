@@ -67,6 +67,23 @@ BAR_REGISTRY_RETENTION_S = 86400  # 24hr bar registry pruning
 SYMBOL                   = SYMBOLS[0]   # BTCUSD
 
 
+# ── Environment validation ────────────────────────────────────────────────
+def _validate_env():
+    from config import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
+    import os
+    missing = []
+    if not MT5_LOGIN or MT5_LOGIN == 0:   missing.append("MT5_LOGIN")
+    if not MT5_PASSWORD:                   missing.append("MT5_PASSWORD")
+    if not MT5_SERVER:                     missing.append("MT5_SERVER")
+    if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("GROQ_API_KEY") and not os.getenv("LLM_PROVIDER","").lower() == "ollama":
+        log.warning("No LLM API key set — will use local autonomous fallback")
+    if missing:
+        log.critical(f"Missing required .env variables: {missing}")
+        log.critical("Copy .env.example to .env and fill in credentials")
+        exit(1)
+    log.info(f"✅ Environment validated | MT5: {MT5_SERVER} #{MT5_LOGIN}")
+
+
 class GynaSystemOrchestrator:
     def __init__(self):
         # ── Core engines ───────────────────────────────────────────────────
