@@ -1,11 +1,16 @@
 """
 Gyna — claude_allocator.py
-Claude's role: ALLOCATION only — not direction, not alpha generation.
-The EdgeEngine has already computed permitted_direction and edge_quality_score.
-Claude selects sl_atr_target and tp_atr_target within the risk envelope,
-and sets aggression_multiplier ≤ edge_quality_score.
+Multi-provider LLM allocator with automatic fallback chain.
 
-On any API failure → local autonomous fallback (conservative, no FLAT).
+Provider priority (set via LLM_PROVIDER in .env):
+  groq      → Groq Llama 3.3 70B (free tier, fast, proven in fleet)
+  anthropic → Claude Sonnet (best quality, paid)
+  local     → Conservative deterministic fallback (no API needed)
+
+Architecture contract:
+  Claude/Groq role = ALLOCATION only (not direction, not alpha)
+  EdgeEngine has already set permitted_direction — cannot be reversed
+  RiskEngine enforces final hard bounds
 
 AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
 """
@@ -16,9 +21,9 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-log = logging.getLogger("Gyna.ClaudeAllocator")
+log = logging.getLogger("Gyna.Allocator")
 
-# ── System prompt (hardened) ───────────────────────────────────────────────
+# ── System prompt (same for all providers) ────────────────────────────────
 SYSTEM_PROMPT = """\
 You are the risk allocation engine of Gyna, an autonomous BTCUSD trading system.
 
@@ -26,176 +31,207 @@ YOUR ROLE IS ALLOCATION — NOT DIRECTION.
 The primary signal layer has already computed:
   - permitted_direction: 1=BUY, -1=SELL (you cannot reverse this)
   - edge_quality_score:  your aggression_multiplier ceiling
-  - allowed_sl_atr_range / allowed_tp_atr_range: hard bounds (you must stay inside)
+  - allowed_sl_atr_range / allowed_tp_atr_range: hard bounds (stay inside)
 
-DECISION INPUTS YOU MUST USE:
-1. regime + regime_confidence + regime_duration + transition_frequency
-2. All technical indicators (RSI, MACD, ATR, BB, HMA, structure)
-3. trade_memory: consecutive losses, drawdown, EQD
-4. regime_fatigue_factor: if high (>0.5), reduce aggression
-5. session: WEEKEND = no trade regardless of signal
-6. Similar past trades from memory (if provided)
-7. Recent losses from memory (if provided)
-
-HARD CONSTRAINTS (violations are rejected, fallback fires):
+HARD CONSTRAINTS (violations trigger fallback):
 1. If permitted_direction == 0 → return execution_profile FLAT, aggression_multiplier 0.0
-2. aggression_multiplier MUST be ≤ edge_quality_score
+2. aggression_multiplier MUST be <= edge_quality_score
 3. sl_atr_target MUST be within allowed_sl_atr_range (inclusive)
 4. tp_atr_target MUST be within allowed_tp_atr_range (inclusive)
 5. If session == WEEKEND → execution_profile FLAT
+6. If regime_fatigue_factor > 0.5 → reduce aggression significantly
+7. If consecutive_losses >= 2 → execution_profile CONSERVATIVE
 
-ALLOCATION PROFILES:
-  AGGRESSIVE:   aggression_multiplier = 0.7–1.0× edge_quality_score
-  CONSERVATIVE: aggression_multiplier = 0.3–0.6× edge_quality_score
-  FLAT:         aggression_multiplier = 0.0 (no trade)
-
-RESPOND ONLY with a single JSON object. No markdown, no preamble:
+RESPOND ONLY with a single JSON object, no markdown, no preamble:
 {
   "execution_profile": "AGGRESSIVE|CONSERVATIVE|FLAT",
-  "aggression_multiplier": <float 0.0–edge_quality_score>,
+  "aggression_multiplier": <float 0.0 to edge_quality_score>,
   "sl_atr_target": <float within allowed_sl_atr_range>,
   "tp_atr_target": <float within allowed_tp_atr_range>,
-  "allocation_rationale": "<one paragraph — what in the data drove this decision>"
+  "allocation_rationale": "<one paragraph explaining the decision>"
 }
 """
 
 
-class ClaudeAllocator:
-    def __init__(self, api_key: Optional[str] = None,
-                 model: str = "claude-sonnet-4-20250514"):
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
-        if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY missing from environment")
-        self.model = model
+class GynAllocator:
+    """
+    Multi-provider LLM allocator.
+    Auto-detects provider from LLM_PROVIDER env var or API key prefix.
+    Falls back through: groq → anthropic → local
+    """
 
-        # Import lazily so module loads without anthropic installed during tests
-        from anthropic import Anthropic
-        self.client = Anthropic(api_key=self.api_key)
+    def __init__(self):
+        self.provider   = os.getenv("LLM_PROVIDER", "groq").lower()
+        self.groq_key   = os.getenv("GROQ_API_KEY", "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")
+        self.claude_key = os.getenv("ANTHROPIC_API_KEY", "")
+        self.groq_model = "llama-3.3-70b-versatile"
+        self.claude_model = "claude-sonnet-4-20250514"
+        log.info(f"Allocator: provider={self.provider}")
 
     def allocate_cycle(self,
                        masked_snapshot: Dict[str, Any],
-                       similar_trades: Optional[list] = None,
-                       recent_losses: Optional[list] = None) -> Dict[str, Any]:
-        """
-        Main allocation call. Returns allocation dict.
-        On any failure → local autonomous fallback (never crashes cycle).
-        """
+                       recent_losses:   Optional[list] = None) -> Dict[str, Any]:
+        """Main allocation call. Returns allocation dict."""
+
         # Fast-path: deterministic flat
         if masked_snapshot.get("permitted_direction", 0) == 0:
             return self._bypass("DETERMINISTIC_FLAT", masked_snapshot)
-
         if masked_snapshot.get("session") == "WEEKEND":
             return self._bypass("WEEKEND_HALT", masked_snapshot)
 
-        # Build user message
+        # Build payload
         payload = masked_snapshot.copy()
-        if similar_trades:
-            payload["similar_past_trades"] = similar_trades
         if recent_losses:
-            payload["recent_losses"] = recent_losses
+            payload["recent_losses"] = recent_losses[-5:]  # last 5 only
 
+        # Try provider chain
+        result = None
+        if self.provider == "groq" or not result:
+            result = self._call_groq(payload, masked_snapshot)
+        if not result and self.claude_key:
+            result = self._call_anthropic(payload, masked_snapshot)
+        if not result:
+            result = self._local_fallback(masked_snapshot)
+
+        return result
+
+    # ── Groq ───────────────────────────────────────────────────────────────
+
+    def _call_groq(self, payload: Dict, snap: Dict) -> Optional[Dict]:
+        if not self.groq_key:
+            return None
         try:
-            response = self.client.messages.create(
-                model=self.model,
+            import urllib.request
+            body = json.dumps({
+                "model":       self.groq_model,
+                "messages":    [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": f"Compute allocation:\n{json.dumps(payload, indent=2, default=str)}"}
+                ],
+                "temperature": 0.0,
+                "max_tokens":  400,
+            }).encode()
+
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=body,
+                headers={
+                    "Content-Type":  "application/json",
+                    "Authorization": f"Bearer {self.groq_key}",
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+
+            raw = data["choices"][0]["message"]["content"].strip()
+            log.info(f"Groq response received ({len(raw)} chars)")
+            return self._parse_and_verify(raw, snap, source="groq")
+
+        except Exception as e:
+            log.warning(f"Groq failed: {e}")
+            return None
+
+    # ── Anthropic ──────────────────────────────────────────────────────────
+
+    def _call_anthropic(self, payload: Dict, snap: Dict) -> Optional[Dict]:
+        if not self.claude_key:
+            return None
+        try:
+            from anthropic import Anthropic
+            client = Anthropic(api_key=self.claude_key)
+            response = client.messages.create(
+                model=self.claude_model,
                 max_tokens=400,
-                temperature=0.0,        # deterministic allocation
+                temperature=0.0,
                 system=SYSTEM_PROMPT,
                 messages=[{
                     "role": "user",
-                    "content": (
-                        f"Compute allocation for this market state:\n\n"
-                        f"{json.dumps(payload, indent=2, default=str)}"
-                    )
+                    "content": f"Compute allocation:\n{json.dumps(payload, indent=2, default=str)}"
                 }]
             )
             raw = response.content[0].text.strip()
-            return self._parse_and_verify(raw, masked_snapshot)
+            log.info(f"Anthropic response received ({len(raw)} chars)")
+            return self._parse_and_verify(raw, snap, source="anthropic")
 
         except Exception as e:
-            log.warning(f"Claude API error: {e} — activating local fallback")
-            return self._local_autonomous_fallback(masked_snapshot)
+            log.warning(f"Anthropic failed: {e}")
+            return None
 
-    # ── Response parser + hard assertion bounds ────────────────────────────
+    # ── Response parser ────────────────────────────────────────────────────
 
-    def _parse_and_verify(self, raw: str,
-                          snap: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_and_verify(self, raw: str, snap: Dict,
+                          source: str = "llm") -> Optional[Dict]:
         try:
-            # Strip markdown fences if present
+            # Strip markdown fences
             if "```" in raw:
                 raw = raw.split("```json")[-1].split("```")[0].strip()
-                if not raw.startswith("{"):
-                    raw = raw.split("{", 1)[-1]
-                    raw = "{" + raw
+            if not raw.startswith("{"):
+                raw = "{" + raw.split("{", 1)[-1]
 
             parsed = json.loads(raw)
+            sl_b     = snap["allowed_sl_atr_range"]
+            tp_b     = snap["allowed_tp_atr_range"]
+            edge_cap = float(snap.get("edge_quality_score", 0.5))
 
-            sl_bounds = snap["allowed_sl_atr_range"]
-            tp_bounds = snap["allowed_tp_atr_range"]
-            edge_cap  = float(snap.get("edge_quality_score", 0.5))
-
-            # Hard assertion bounds (violations → fallback, not crash)
-            assert parsed["execution_profile"] in ("AGGRESSIVE", "CONSERVATIVE", "FLAT"), \
-                f"Invalid profile: {parsed['execution_profile']}"
-            assert 0.0 <= float(parsed["aggression_multiplier"]) <= edge_cap + 1e-6, \
-                f"Aggression {parsed['aggression_multiplier']} > edge cap {edge_cap}"
-            assert sl_bounds[0] <= float(parsed["sl_atr_target"]) <= sl_bounds[1], \
-                f"SL {parsed['sl_atr_target']} outside {sl_bounds}"
-            assert tp_bounds[0] <= float(parsed["tp_atr_target"]) <= tp_bounds[1], \
-                f"TP {parsed['tp_atr_target']} outside {tp_bounds}"
+            # Hard bounds validation
+            assert parsed["execution_profile"] in ("AGGRESSIVE", "CONSERVATIVE", "FLAT")
+            assert 0.0 <= float(parsed["aggression_multiplier"]) <= edge_cap + 1e-6
+            assert sl_b[0] <= float(parsed["sl_atr_target"]) <= sl_b[1]
+            assert tp_b[0] <= float(parsed["tp_atr_target"]) <= tp_b[1]
 
             return {
-                "status":               "SUCCESS",
-                "snapshot_hash":        snap.get("snapshot_hash", ""),
-                "permitted_direction":  snap["permitted_direction"],
-                "execution_profile":    parsed["execution_profile"],
+                "status":                "SUCCESS",
+                "source":                source,
+                "snapshot_hash":         snap.get("snapshot_hash", ""),
+                "permitted_direction":   snap["permitted_direction"],
+                "execution_profile":     parsed["execution_profile"],
                 "aggression_multiplier": round(float(parsed["aggression_multiplier"]), 3),
-                "sl_atr_target":        round(float(parsed["sl_atr_target"]), 2),
-                "tp_atr_target":        round(float(parsed["tp_atr_target"]), 2),
-                "allocation_rationale": str(parsed.get("allocation_rationale", "")),
+                "sl_atr_target":         round(float(parsed["sl_atr_target"]), 2),
+                "tp_atr_target":         round(float(parsed["tp_atr_target"]), 2),
+                "allocation_rationale":  str(parsed.get("allocation_rationale", "")),
             }
 
         except Exception as e:
-            log.warning(f"Allocation parse/verify failed: {e} — fallback")
-            return self._local_autonomous_fallback(snap)
+            log.warning(f"Parse/verify failed ({source}): {e}")
+            return None
 
-    # ── Fallbacks ──────────────────────────────────────────────────────────
+    # ── Local autonomous fallback ──────────────────────────────────────────
 
-    def _local_autonomous_fallback(self,
-                                   snap: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Conservative autonomous allocation when Claude API is unavailable.
-        Uses edge_quality_score at 50% capacity. Never returns FLAT
-        unless permitted_direction is already 0.
-        """
-        edge   = float(snap.get("edge_quality_score", 0.3))
-        sl_b   = snap.get("allowed_sl_atr_range", [1.0, 2.0])
-        tp_b   = snap.get("allowed_tp_atr_range", [2.0, 4.0])
-        # Conservative: SL at 80th percentile of range, TP at 40th
+    def _local_fallback(self, snap: Dict) -> Dict:
+        edge = float(snap.get("edge_quality_score", 0.3))
+        sl_b = snap.get("allowed_sl_atr_range", [1.0, 2.0])
+        tp_b = snap.get("allowed_tp_atr_range", [2.0, 4.0])
         sl_val = round(sl_b[0] + (sl_b[1] - sl_b[0]) * 0.8, 2)
         tp_val = round(tp_b[0] + (tp_b[1] - tp_b[0]) * 0.4, 2)
-
+        log.warning("Using local autonomous fallback")
         return {
-            "status":               "SUCCESS_LOCAL_AUTONOMOUS_FALLBACK",
-            "snapshot_hash":        snap.get("snapshot_hash", ""),
-            "permitted_direction":  snap.get("permitted_direction", 0),
-            "execution_profile":    "CONSERVATIVE",
+            "status":                "SUCCESS_LOCAL_FALLBACK",
+            "source":                "local",
+            "snapshot_hash":         snap.get("snapshot_hash", ""),
+            "permitted_direction":   snap.get("permitted_direction", 0),
+            "execution_profile":     "CONSERVATIVE",
             "aggression_multiplier": round(edge * 0.5, 3),
-            "sl_atr_target":        sl_val,
-            "tp_atr_target":        tp_val,
-            "allocation_rationale": "Local autonomous fallback: Claude API unavailable.",
+            "sl_atr_target":         sl_val,
+            "tp_atr_target":         tp_val,
+            "allocation_rationale":  "Local autonomous fallback — all APIs unavailable.",
         }
 
-    def _bypass(self, condition: str,
-                snap: Dict[str, Any]) -> Dict[str, Any]:
+    def _bypass(self, condition: str, snap: Dict) -> Dict:
         sl_b = snap.get("allowed_sl_atr_range", [1.0, 2.0])
         tp_b = snap.get("allowed_tp_atr_range", [2.0, 4.0])
         return {
-            "status":               f"BYPASS_{condition}",
-            "snapshot_hash":        snap.get("snapshot_hash", ""),
-            "permitted_direction":  0,
-            "execution_profile":    "FLAT",
+            "status":                f"BYPASS_{condition}",
+            "source":                "bypass",
+            "snapshot_hash":         snap.get("snapshot_hash", ""),
+            "permitted_direction":   0,
+            "execution_profile":     "FLAT",
             "aggression_multiplier": 0.0,
-            "sl_atr_target":        sl_b[0],
-            "tp_atr_target":        tp_b[0],
-            "allocation_rationale": f"Bypass: {condition}",
+            "sl_atr_target":         sl_b[0],
+            "tp_atr_target":         tp_b[0],
+            "allocation_rationale":  f"Bypass: {condition}",
         }
+
+
+# Backward compatible alias
+ClaudeAllocator = GynAllocator
