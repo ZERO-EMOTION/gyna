@@ -76,8 +76,7 @@ class GynAllocator:
         # Fast-path: deterministic flat
         if masked_snapshot.get("permitted_direction", 0) == 0:
             return self._bypass("DETERMINISTIC_FLAT", masked_snapshot)
-        if masked_snapshot.get("session") == "WEEKEND":
-            return self._bypass("WEEKEND_HALT", masked_snapshot)
+        # WEEKEND trading allowed for BTCUSD (24/7 asset)
 
         # Build payload
         payload = masked_snapshot.copy()
