@@ -26,7 +26,7 @@ MODEL             = "claude-sonnet-4-20250514"
 SYMBOLS        = ["BTCUSD"]
 TIMEFRAME_STR  = "M15"           # human-readable; mt5_bridge converts to mt5.TIMEFRAME_M15
 BARS           = 200
-CYCLE_MINUTES  = 15              # main loop interval
+CYCLE_MINUTES  = 1               # M1 scalping
 
 # Kill hours (UTC) — empirically proven worst hours across fleet
 KILL_HOURS_UTC = []
