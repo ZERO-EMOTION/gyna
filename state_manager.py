@@ -6,7 +6,7 @@ state reconciliation against MT5 terminal, and telemetry buffering.
 Separate from trade_log.py (historical memory) — this tracks LIVE positions
 and survives process crashes via synchronous WAL writes.
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import json
 import logging

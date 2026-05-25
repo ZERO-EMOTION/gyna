@@ -4,7 +4,7 @@ Production-hardened execution loop supervisor.
 
 Architecture:
   50ms monotonic perf_counter tick loop (position telemetry + watchdog)
-  15-min bar allocation cycle (feature → edge → Claude → risk → execute)
+  1-min bar allocation cycle (feature → edge → Claude → risk → execute)
 
 Key mechanisms:
   enforce_terminal_watchdog()      — connectivity + feed staleness check
@@ -12,14 +12,14 @@ Key mechanisms:
   historical_bar_execution_registry — prevents double-entry per bar+direction
   prune_historical_bar_registry()  — 24hr memory pruning
   toxicity_scalar                  — 0.5x aggression on toxic snapshot hash
-  process_high_frequency_tick_telemetry — adaptive decay stealth exits
+  process_tick_telemetry()         — adaptive decay stealth exits
   system_rehydration_barrier()     — crash-safe startup reconciliation
+  _rebuild_daily_loss_from_history() — broker-authoritative daily PnL (P4)
+  _realized_pnl_for_position()     — broker deal history PnL (P3)
 
-Wires: config, feature_engine, regime_engine, edge_engine,
-       claude_allocator, risk_engine, execution_telemetry,
-       state_manager, mt5_bridge, post_trade_analytics, memory/trade_log
+Hardening audit: GYNA_HARDENING_AUDIT_001 (priorities 1-6 applied)
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 
@@ -32,7 +32,8 @@ import MetaTrader5 as mt5
 from config import (
     NAME, VERSION, SYMBOLS, CYCLE_MINUTES, KILL_HOURS_UTC,
     MAX_OPEN_POSITIONS, DB_PATH, SIMILAR_TRADES_K, RECENT_LOSSES_N,
-    RISK_TIERS,
+    RISK_TIERS, USE_BROKER_EMERGENCY_SL, EMERGENCY_SL_MULTIPLIER,
+    MAX_DAILY_LOSS,
 )
 from feature_engine import FeatureEngine
 from edge_engine import EdgeEngine
@@ -114,6 +115,11 @@ class GynaSystemOrchestrator:
         self.daily_loss_pct:     float = 0.0
         self.current_eqd:        float = 0.0
 
+        # ── P4: day-anchor for broker-authoritative daily loss ─────────────
+        self.day_anchor_date:   str   = ""
+        self.day_start_equity:  float = 0.0
+        self.daily_realized_pnl: float = 0.0
+
     # ── Terminal watchdog ──────────────────────────────────────────────────
 
     def enforce_terminal_watchdog(self) -> bool:
@@ -156,6 +162,81 @@ class GynaSystemOrchestrator:
         if "BTC" in SYMBOL or "ETH" in SYMBOL:
             return True
         return time.gmtime().tm_wday not in (5, 6)
+
+    # ── P3: Broker-authoritative realized PnL for a closed position ───────
+
+    def _realized_pnl_for_position(self, position_id: int,
+                                   lookback_days: int = 7) -> float:
+        """
+        Query MT5 deal history to get true broker-reported PnL for a position.
+        Includes profit + commission + swap + fee.
+        Falls back to 0.0 if history unavailable (fails safe).
+        """
+        from datetime import datetime, timedelta, timezone
+        utc_to   = datetime.now(timezone.utc)
+        utc_from = utc_to - timedelta(days=lookback_days)
+        deals = mt5.history_deals_get(utc_from, utc_to)
+        if deals is None:
+            log.warning(f"[PNL] MT5 deals unavailable for ticket {position_id}")
+            return 0.0
+        total = 0.0
+        for d in deals:
+            if int(getattr(d, "position_id", -1)) == int(position_id):
+                total += float(getattr(d, "profit", 0.0))
+                total += float(getattr(d, "commission", 0.0))
+                total += float(getattr(d, "swap", 0.0))
+                total += float(getattr(d, "fee", 0.0))
+        return total
+
+    # ── P4: Rebuild daily loss from MT5 deal history ───────────────────────
+
+    def _rebuild_daily_loss_from_history(self) -> None:
+        """
+        Recompute today's realized PnL from MT5 deal history.
+        Called on startup and before each allocation to survive crashes/restarts.
+        Also resets day anchor when calendar day changes.
+        """
+        from datetime import datetime, timezone
+        now       = datetime.now(timezone.utc)
+        today_str = now.date().isoformat()
+
+        # Day rollover
+        if today_str != self.day_anchor_date:
+            account = mt5.account_info()
+            self.day_anchor_date  = today_str
+            self.day_start_equity = float(account.equity) if account else 0.0
+            self.daily_realized_pnl = 0.0
+            log.info(f"[DAYANCHOR] New day {today_str} | start equity={self.day_start_equity:.2f}")
+            return
+
+        # Recompute realized PnL from history deals since day start
+        from datetime import timedelta
+        day_start = datetime(now.year, now.month, now.day, 0, 0, 0,
+                             tzinfo=timezone.utc)
+        deals = mt5.history_deals_get(day_start, now)
+        if deals is None:
+            return
+        realized = sum(
+            float(getattr(d, "profit", 0.0)) +
+            float(getattr(d, "commission", 0.0)) +
+            float(getattr(d, "swap", 0.0)) +
+            float(getattr(d, "fee", 0.0))
+            for d in deals
+            if getattr(d, "entry", -1) == mt5.DEAL_ENTRY_OUT   # closed-leg deals only
+        )
+        self.daily_realized_pnl = realized
+
+        account = mt5.account_info()
+        if account and self.day_start_equity > 0.0:
+            realized_loss_pct = max(0.0, -realized / self.day_start_equity)
+            # Include floating loss for conservative breaker
+            floating_dd_pct = max(0.0,
+                (self.day_start_equity - float(account.equity)) / self.day_start_equity)
+            self.daily_loss_pct = max(realized_loss_pct, floating_dd_pct)
+
+            if self.daily_loss_pct >= MAX_DAILY_LOSS:
+                log.warning(f"[DAYANCHOR] Daily loss {self.daily_loss_pct:.2%} >= "
+                            f"{MAX_DAILY_LOSS:.2%} — breaker active")
 
     # ── Position cache ─────────────────────────────────────────────────────
 
@@ -263,6 +344,9 @@ class GynaSystemOrchestrator:
                 elif action["action"] == "FORCE_IMPORT_REBUILD":
                     self.state_db.register_stealth_position(tid, action["payload"])
 
+        # P4: rebuild daily loss from broker history on startup
+        self._rebuild_daily_loss_from_history()
+
         log.info("[BOOT] Rehydration complete — loop starting")
 
     # ── Tick telemetry (stealth exits) ─────────────────────────────────────
@@ -328,7 +412,18 @@ class GynaSystemOrchestrator:
                     self.cached_positions.pop(ticket, None)
 
                     is_loss = loss_pts >= adj_sl
-                    pnl_pts = -loss_pts if is_loss else profit_pts
+
+                    # P3: use broker-authoritative PnL from deal history
+                    realized_usd = self._realized_pnl_for_position(ticket)
+                    # Fallback to synthetic if history unavailable (0.0 returned)
+                    if realized_usd == 0.0:
+                        pnl_pts     = -loss_pts if is_loss else profit_pts
+                        realized_usd = pnl_pts * float(pos["volume"])
+                        log.warning(f"[STEALTH] {ticket} PnL from history unavailable "
+                                    f"— using synthetic {realized_usd:.2f}")
+                    else:
+                        pnl_pts = realized_usd / max(float(pos["volume"]), 1e-10)
+
                     self.consecutive_losses = (self.consecutive_losses + 1
                                                if is_loss else 0)
                     self.state_db.save_system_context(
@@ -339,11 +434,11 @@ class GynaSystemOrchestrator:
                         trade_id=ticket,
                         exit_price=close_price,
                         pnl_pips=pnl_pts,
-                        pnl_usd=pnl_pts * float(pos["volume"]),
+                        pnl_usd=realized_usd,
                         outcome="loss" if is_loss else "win",
                     )
                     log.info(f"[STEALTH] {ticket} closed {'LOSS' if is_loss else 'WIN'} "
-                             f"{pnl_pts:+.1f}pts")
+                             f"pnl=${realized_usd:+.2f}")
                 else:
                     err = getattr(result, "retcode", "TIMEOUT")
                     log.error(f"[STEALTH] Close failed on {ticket}: {err} — releasing lock")
@@ -465,19 +560,26 @@ class GynaSystemOrchestrator:
         if allocation.get("execution_profile") == "FLAT":
             return
 
+        # ── P4: rebuild daily loss before risk check ───────────────────────
+        self._rebuild_daily_loss_from_history()
+
         # ── Risk engine (final authority) ──────────────────────────────────
         account_state = {
-            "balance":                    account.balance,
-            "free_margin":                account.margin_free,
-            "leverage":                   account.leverage,
-            "daily_realized_loss_pct":    self.daily_loss_pct,
-            "current_spread_points":      sym_info.spread,
-            "min_lot_limit":              sym_info.volume_min,
-            "max_lot_limit":              sym_info.volume_max,
-            "SYMBOL_MARGIN_INITIAL":      sym_info.margin_initial,
-            "SYMBOL_TRADE_CONTRACT_SIZE": sym_info.trade_contract_size,
-            "SYMBOL_TRADE_TICK_VALUE":    sym_info.trade_tick_value,
-            "SYMBOL_TRADE_TICK_SIZE":     sym_info.trade_tick_size,
+            "balance":                      account.balance,
+            "equity":                       account.equity,
+            "free_margin":                  account.margin_free,
+            "leverage":                     account.leverage,
+            "daily_realized_loss_pct":      self.daily_loss_pct,
+            "current_spread_points":        sym_info.spread,
+            "min_lot_limit":                sym_info.volume_min,
+            "max_lot_limit":                sym_info.volume_max,
+            "SYMBOL_MARGIN_INITIAL":        sym_info.margin_initial,
+            "SYMBOL_TRADE_CONTRACT_SIZE":   sym_info.trade_contract_size,
+            "SYMBOL_TRADE_TICK_VALUE":      sym_info.trade_tick_value,
+            "SYMBOL_TRADE_TICK_SIZE":       sym_info.trade_tick_size,
+            # P2: explicit risk context — risk law reads from here, not signal layer
+            "consecutive_losses":           self.consecutive_losses,
+            "execution_quality_degradation": self.current_eqd,
         }
 
         auth = self.risk.authorize_execution(allocation, account_state, masked, mem_stats)
@@ -492,10 +594,23 @@ class GynaSystemOrchestrator:
         price      = (mt5.symbol_info_tick(SYMBOL).ask if direction == 1
                       else mt5.symbol_info_tick(SYMBOL).bid)
 
-        t_sent      = time.time()
+        # P1: capture both wall-clock (for DB/logs) and perf_counter (for latency)
+        t_sent_wall = time.time()
         t_sent_perf = time.perf_counter()
+
+        # P5: emergency broker SL as disaster fallback (Python/VPS crash protection)
+        #     Virtual SL remains primary exit; broker SL is only a safety net
+        tick_sz = sym_info.trade_tick_size
+        if USE_BROKER_EMERGENCY_SL:
+            emg_sl_pts  = int(params["virtual_sl_points"] * EMERGENCY_SL_MULTIPLIER)
+            broker_sl   = (price - emg_sl_pts * tick_sz if direction == 1
+                           else price + emg_sl_pts * tick_sz)
+        else:
+            broker_sl = 0.0
+
         filling = self._get_filling_mode(SYMBOL)
-        log.info(f"[EXEC] Sending order: {order_type} {params['volume']}lot @ {price:.2f} filling={filling}")
+        log.info(f"[EXEC] Sending: {order_type} {params['volume']}lot @ {price:.2f} "
+                 f"emg_sl={broker_sl:.2f} filling={filling}")
         result = mt5.order_send({
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       SYMBOL,
@@ -503,13 +618,16 @@ class GynaSystemOrchestrator:
             "type":         order_type,
             "price":        price,
             "deviation":    20,
-            "sl":           0.0,
+            "sl":           round(broker_sl, 2),
             "tp":           0.0,
             "type_filling": filling,
             "type_time":    mt5.ORDER_TIME_GTC,
             "comment":      f"Gyna:{snap.get('snapshot_hash','')[:8]}",
         })
-        t_fill = time.time()
+
+        # P1: capture fill perf_counter immediately after broker response
+        t_fill_perf = time.perf_counter()
+        t_fill_wall = time.time()
 
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             err = getattr(result, "retcode", "TIMEOUT")
@@ -518,25 +636,29 @@ class GynaSystemOrchestrator:
 
         ticket     = int(result.order)
         fill_price = float(result.price)
-        tick_sz    = sym_info.trade_tick_size
         slippage   = ((fill_price - price) / tick_sz if direction == 1
                       else (price - fill_price) / tick_sz)
 
+        # P1: pass both wall-clock and perf timestamps — telemetry uses perf for precision
         broker_receipt = {
-            "execution_successful": True,
-            "ticket_id":    ticket,
-            "fill_price":   fill_price,
-            "timestamp_sent":  t_sent,
-            "timestamp_fill":  t_fill,
-            "tick_size":    tick_sz,
+            "execution_successful":  True,
+            "ticket_id":             ticket,
+            "fill_price":            fill_price,
+            "timestamp_sent":        t_sent_wall,
+            "timestamp_fill":        t_fill_wall,
+            "timestamp_sent_perf":   t_sent_perf,   # P1: high-precision latency
+            "timestamp_fill_perf":   t_fill_perf,   # P1: high-precision latency
+            "tick_size":             tick_sz,
         }
         tel_profile = self.telemetry.log_transaction(
-            {**auth, "timestamp_sent": t_sent}, broker_receipt)
+            {**auth, "timestamp_sent": t_sent_wall, "timestamp_sent_perf": t_sent_perf},
+            broker_receipt)
         self.current_eqd = tel_profile["metrics"]["execution_quality_degradation"]
 
-        # Telemetry buffer
+        # P6: telemetry buffer uses perf_counter delta (not wall-clock) for latency
+        latency_ms = (t_fill_perf - t_sent_perf) * 1000.0
         self.state_db.buffer_telemetry_metric(
-            (t_fill - t_sent) * 1000,
+            latency_ms,
             slippage,
             self.current_eqd,
         )
@@ -550,7 +672,7 @@ class GynaSystemOrchestrator:
             "virtual_sl_points": params["virtual_sl_points"],
             "virtual_tp_points": params["virtual_tp_points"],
             "snapshot_hash":     auth.get("snapshot_hash", ""),
-            "timestamp_opened":  t_sent,
+            "timestamp_opened":  t_sent_wall,
         }
         self.state_db.register_stealth_position(ticket, pos_details)
 
@@ -558,8 +680,8 @@ class GynaSystemOrchestrator:
         self.cached_positions[ticket] = {**pos_details, "is_optimistic": True}
 
         # Bar registry lock
-        self.bar_registry[bar_key] = t_sent
-        self.last_entry_ts = t_sent
+        self.bar_registry[bar_key] = t_sent_wall
+        self.last_entry_ts = t_sent_wall
 
         # Trade memory log
         trade_id = self.memory.log_trade({

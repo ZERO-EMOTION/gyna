@@ -12,7 +12,7 @@ Architecture contract:
   EdgeEngine has already set permitted_direction — cannot be reversed
   RiskEngine enforces final hard bounds
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 

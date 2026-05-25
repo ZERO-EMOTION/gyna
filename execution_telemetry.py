@@ -6,7 +6,7 @@ and EQD (Execution Quality Degradation) coefficient.
 EQD feeds back into risk_engine.py to reduce lot sizing
 when execution quality degrades (high slippage or latency = smaller risk).
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ Responsibilities:
 
 RiskEngine is the last gate. Claude is interpretation. This is law.
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 
@@ -99,10 +99,11 @@ class RiskEngine:
         tier          = self.get_risk_tier(memory_stats)
         base_risk     = tier["risk_pct"]
         aggr          = float(allocation.get("aggression_multiplier", 0.3))
-        consecutive_l = int(market_snapshot.get("trade_memory", {})
-                            .get("consecutive_losses", 0))
-        eqd           = float(market_snapshot.get("trade_memory", {})
-                              .get("execution_quality_degradation", 0.0))
+        # P2: read risk context from account_state (explicit), not signal-layer mutation
+        consecutive_l = int(account_state.get("consecutive_losses",
+                            market_snapshot.get("trade_memory", {}).get("consecutive_losses", 0)))
+        eqd           = float(account_state.get("execution_quality_degradation",
+                              market_snapshot.get("trade_memory", {}).get("execution_quality_degradation", 0.0)))
 
         # Scale: base × aggression^1.5, halved per consecutive loss, EQD penalty
         scaled_risk = base_risk * (aggr ** 1.5)

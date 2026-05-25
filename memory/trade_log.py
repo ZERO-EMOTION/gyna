@@ -2,7 +2,7 @@
 Gyna — memory/trade_log.py
 SQLite persistent trade memory — full schema with all columns from blueprint.
 Never deletes. Compounding intelligence over time.
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import sqlite3
 import os

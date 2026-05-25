@@ -10,7 +10,7 @@ Three-method consensus (via ta library — validated, no lookahead):
 All signals computed causally. Returns RegimeResult dataclass
 consumed by feature_engine.py and injected into Claude's prompt.
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 from dataclasses import dataclass

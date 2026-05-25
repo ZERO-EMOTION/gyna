@@ -12,7 +12,7 @@ Answers:
 Reads from system_state.db (closed_trades_ledger table).
 Writes nothing — pure analytical read layer.
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 Gyna — mt5_bridge.py
 Thin MT5 connection wrapper. Main execution logic lives in main_orchestrator.py.
 This module used for standalone connection testing and simple queries.
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import MetaTrader5 as mt5
 import pandas as pd

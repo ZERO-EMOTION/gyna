@@ -15,7 +15,7 @@ Key design decisions:
   - snapshot_hash (SHA-256) for audit trail + vector store integrity
   - RISK_ENVELOPES defined here, enforced by RiskEngine (final authority)
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import hashlib
 import json

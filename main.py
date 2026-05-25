@@ -3,7 +3,7 @@ Gyna — main.py
 Full autonomous trading loop for BTCUSD.
 Phase 1: Foundation — MT5 connect + feature stub + memory logging.
 Phase 2+ will wire Claude brain, vector store, reflection.
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import time
 import schedule

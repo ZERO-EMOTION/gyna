@@ -15,7 +15,7 @@ Signal logic:
 
 Output feeds directly into claude_allocator.py as masked_snapshot.
 
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
 from typing import Any, Dict

@@ -1,7 +1,7 @@
 """
 Gyna — config.py
 Central configuration. NO external imports (no mt5 here — imported only in mt5_bridge.py).
-AURELIA EMPIRE | ZEROEMOTIONS | CLAUDE inside™
+Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import os
 from dotenv import load_dotenv
@@ -57,6 +57,10 @@ DB_PATH           = "memory/gyna_trades.db"
 VECTOR_STORE_PATH = "memory/qdrant_store"
 SIMILAR_TRADES_K  = 5         # how many similar past trades to retrieve
 RECENT_LOSSES_N   = 10        # how many recent losses to show Claude
+
+# ── Emergency broker stop (disaster fallback for Python/VPS crash) ────────
+USE_BROKER_EMERGENCY_SL  = True   # Set broker SL wider than virtual; virtual remains primary
+EMERGENCY_SL_MULTIPLIER  = 1.50   # Broker SL = virtual SL × this multiplier
 
 # ── Reflection ────────────────────────────────────────────────────────────
 REFLECTION_DAY    = 6         # Sunday (0=Monday)
