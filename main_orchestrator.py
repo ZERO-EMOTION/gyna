@@ -430,8 +430,8 @@ class GynaSystemOrchestrator:
                         self.consecutive_losses, self.daily_loss_pct)
 
                     # Log to trade memory
-                    self.memory.close_trade(
-                        trade_id=ticket,
+                    self.memory.close_trade_by_ticket(
+                        mt5_ticket=ticket,
                         exit_price=close_price,
                         pnl_pips=pnl_pts,
                         pnl_usd=realized_usd,
