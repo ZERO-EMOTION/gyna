@@ -1,22 +1,11 @@
-# Gyna — requirements.txt
-# Phase 1: Foundation
-# Phase 2+ will add: qdrant-client, sentence-transformers, anthropic
+# Gyna / PARALLAX — requirements.txt
+# Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 
 # MT5
 MetaTrader5>=5.0.45
 
-# LangGraph + LangChain (Phase 2 brain)
-langgraph>=0.2.0
-langchain>=0.3.0
-langchain-anthropic>=0.3.0
-langchain-community>=0.3.0
-
-# Anthropic direct SDK (used in claude_brain.py Phase 2)
+# Anthropic (primary LLM — claude_allocator.py)
 anthropic>=0.40.0
-
-# Vector memory (Phase 2)
-qdrant-client>=1.9.0
-sentence-transformers>=3.0.0
 
 # Data
 pandas>=2.0.0
@@ -25,10 +14,3 @@ ta>=0.11.0
 
 # Utilities
 python-dotenv>=1.0.0
-schedule>=1.2.0
-
-# Optional: Telegram notifications
-python-telegram-bot>=21.0
-
-# Optional: Dashboard
-streamlit>=1.35.0
