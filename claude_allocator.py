@@ -72,14 +72,18 @@ class GynAllocator:
     """
 
     def __init__(self):
-        self.provider     = os.getenv("LLM_PROVIDER", "ollama").lower()
+        from config import (LLM_PROVIDER, ANTHROPIC_API_KEY, MODEL,
+                            GROQ_MODEL, OLLAMA_URL, OLLAMA_MODEL)
+        self.provider     = LLM_PROVIDER
         self.groq_key     = os.getenv("GROQ_API_KEY", "")
-        self.claude_key   = os.getenv("ANTHROPIC_API_KEY", "")
-        self.ollama_url   = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        self.ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
-        self.groq_model   = "llama-3.3-70b-versatile"
-        self.claude_model = "claude-sonnet-4-20250514"
-        log.info(f"Allocator: provider={self.provider} model={self.ollama_model if self.provider=='ollama' else ''}")
+        self.claude_key   = ANTHROPIC_API_KEY
+        self.ollama_url   = OLLAMA_URL
+        self.ollama_model = OLLAMA_MODEL
+        self.groq_model   = GROQ_MODEL
+        self.claude_model = MODEL
+        active_model = {"ollama": self.ollama_model, "groq": self.groq_model,
+                        "anthropic": self.claude_model}.get(self.provider, "local")
+        log.info(f"Allocator: provider={self.provider} model={active_model}")
 
     def allocate_cycle(self,
                        masked_snapshot: Dict[str, Any],
@@ -191,10 +195,10 @@ class GynAllocator:
         try:
             from anthropic import Anthropic
             client = Anthropic(api_key=self.claude_key)
+            # No temperature: claude-sonnet-5 rejects non-default sampling params (400)
             response = client.messages.create(
                 model=self.claude_model,
                 max_tokens=400,
-                temperature=0.0,
                 system=SYSTEM_PROMPT,
                 messages=[{
                     "role": "user",

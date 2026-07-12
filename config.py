@@ -10,7 +10,7 @@ load_dotenv()
 
 # ── Identity ───────────────────────────────────────────────────────────────
 NAME    = "Gyna"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ── MT5 Connection ─────────────────────────────────────────────────────────
 MT5_LOGIN    = int(os.getenv("MT5_LOGIN", 0))
@@ -18,9 +18,14 @@ MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER   = os.getenv("MT5_SERVER", "")
 
 # ── LLM ───────────────────────────────────────────────────────────────────
-LLM_PROVIDER      = "anthropic"
+# Provider chain: the allocator tries LLM_PROVIDER first, then falls through
+# groq → anthropic → local deterministic fallback.
+LLM_PROVIDER      = os.getenv("LLM_PROVIDER", "anthropic").lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-MODEL             = "claude-sonnet-4-20250514"
+MODEL             = os.getenv("MODEL", "claude-sonnet-5")
+GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+OLLAMA_URL        = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
 
 # ── Trading ────────────────────────────────────────────────────────────────
 SYMBOLS        = ["BTCUSD"]
@@ -46,16 +51,10 @@ RISK_TIERS = [
 MAX_RISK_PER_TRADE  = 0.0025  # BTC M1 — 0.25% max initially
 MAX_DAILY_LOSS      = 0.050   # 5% daily halt
 MAX_OPEN_POSITIONS  = 1       # BTCUSD concentration — no hedging
-MIN_CONFIDENCE      = 0.65    # Claude must be ≥65% confident to trade
-
-# SL/TP defaults (ATR multiples) — Claude can override per-trade
-DEFAULT_SL_ATR = 1.5
-DEFAULT_TP_ATR = 3.0          # 2:1 RR minimum
 
 # ── Memory ────────────────────────────────────────────────────────────────
-DB_PATH           = "memory/gyna_trades.db"
-VECTOR_STORE_PATH = "memory/qdrant_store"
-SIMILAR_TRADES_K  = 5         # how many similar past trades to retrieve
+DB_PATH           = "memory/gyna_trades.db"   # TradeMemory — permanent trade log
+STATE_DB_PATH     = "memory/system_state.db"  # StateManager + analytics — live state
 RECENT_LOSSES_N   = 10        # how many recent losses to show Claude
 
 # ── Emergency broker stop (disaster fallback for Python/VPS crash) ────────
@@ -70,4 +69,5 @@ REFLECTION_HOUR   = 0         # 00:00 UTC
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-print(f"✅ {NAME} v{VERSION} config loaded | Model: {MODEL}")
+# ASCII-only: emoji in print() crashes on cp1252 Windows consoles
+print(f"[OK] {NAME} v{VERSION} config loaded | Provider: {LLM_PROVIDER} | Model: {MODEL}")

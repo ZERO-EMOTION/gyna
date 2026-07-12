@@ -34,7 +34,7 @@ class MT5Bridge:
             print(f"MT5 initialize failed: {mt5.last_error()}")
             return False
         self.connected = True
-        print(f"✅ {NAME} connected to MT5 | Server: {MT5_SERVER}")
+        print(f"[OK] {NAME} connected to MT5 | Server: {MT5_SERVER}")
         return True
 
     def disconnect(self):
