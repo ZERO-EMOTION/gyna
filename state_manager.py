@@ -53,7 +53,12 @@ class StateManager:
                 virtual_tp_points   INTEGER NOT NULL,
                 snapshot_hash       TEXT NOT NULL,
                 timestamp_opened    REAL NOT NULL,
-                operational_state   TEXT DEFAULT 'OPEN'
+                operational_state   TEXT DEFAULT 'OPEN',
+                regime              TEXT,
+                session             TEXT,
+                execution_profile   TEXT,
+                entry_spread_points REAL,
+                state_signature     TEXT
             );""",
             """CREATE TABLE IF NOT EXISTS telemetry_ledger (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,10 +67,40 @@ class StateManager:
                 slippage_points REAL NOT NULL,
                 eqd_coefficient REAL NOT NULL
             );""",
+            """CREATE TABLE IF NOT EXISTS closed_trades_ledger (
+                ticket_id           INTEGER PRIMARY KEY,
+                snapshot_hash       TEXT,
+                state_signature     TEXT,
+                regime              TEXT,
+                session             TEXT,
+                direction           INTEGER,
+                execution_profile   TEXT,
+                entry_spread_points REAL,
+                realized_pnl_points REAL,
+                avg_latency_ms      REAL,
+                avg_slippage_points REAL,
+                final_eqd           REAL,
+                timestamp_closed    REAL
+            );""",
         ]
         with self._get_connection() as conn:
             for stmt in statements:
                 conn.execute(stmt)
+            # Migrate pre-1.1 schemas: add entry-context columns if missing
+            existing = {row[1] for row in
+                        conn.execute("PRAGMA table_info(active_stealth_positions)")}
+            for col, dtype in (("regime", "TEXT"), ("session", "TEXT"),
+                               ("execution_profile", "TEXT"),
+                               ("entry_spread_points", "REAL"),
+                               ("state_signature", "TEXT")):
+                if existing and col not in existing:
+                    conn.execute(f"ALTER TABLE active_stealth_positions "
+                                 f"ADD COLUMN {col} {dtype}")
+            ledger_cols = {row[1] for row in
+                           conn.execute("PRAGMA table_info(closed_trades_ledger)")}
+            if ledger_cols and "state_signature" not in ledger_cols:
+                conn.execute("ALTER TABLE closed_trades_ledger "
+                             "ADD COLUMN state_signature TEXT")
             conn.commit()
 
     # ── System context ─────────────────────────────────────────────────────
@@ -103,12 +138,17 @@ class StateManager:
                 "INSERT INTO active_stealth_positions "
                 "(ticket_id, symbol, direction, volume, entry_price, "
                 "virtual_sl_points, virtual_tp_points, snapshot_hash, "
-                "timestamp_opened, operational_state) "
-                "VALUES (?,?,?,?,?,?,?,?,?,'OPEN');",
+                "timestamp_opened, operational_state, regime, session, "
+                "execution_profile, entry_spread_points, state_signature) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'OPEN',?,?,?,?,?);",
                 (ticket_id, pos["symbol"], pos["direction"], pos["volume"],
                  pos["entry_price"], pos["virtual_sl_points"],
                  pos["virtual_tp_points"], pos["snapshot_hash"],
-                 pos.get("timestamp_opened", time.time()))
+                 pos.get("timestamp_opened", time.time()),
+                 pos.get("regime"), pos.get("session"),
+                 pos.get("execution_profile"),
+                 pos.get("entry_spread_points"),
+                 pos.get("state_signature"))
             )
             conn.commit()
 
@@ -149,20 +189,37 @@ class StateManager:
     def get_all_active_stealth_positions(self) -> Dict[int, Dict[str, Any]]:
         positions: Dict[int, Dict[str, Any]] = {}
         with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
             cur = conn.execute("SELECT * FROM active_stealth_positions;")
             for row in cur.fetchall():
-                positions[row[0]] = {
-                    "symbol":             row[1],
-                    "direction":          row[2],
-                    "volume":             row[3],
-                    "entry_price":        row[4],
-                    "virtual_sl_points":  row[5],
-                    "virtual_tp_points":  row[6],
-                    "snapshot_hash":      row[7],
-                    "timestamp_opened":   row[8],
-                    "operational_state":  row[9],
-                }
+                positions[row["ticket_id"]] = dict(row)
         return positions
+
+    # ── Closed trades ledger (feeds post_trade_analytics) ──────────────────
+
+    def record_closed_trade(self, ticket_id: int, pos: Dict[str, Any],
+                            realized_pnl_points: float,
+                            avg_latency_ms: float,
+                            avg_slippage_points: float,
+                            final_eqd: float) -> None:
+        """Persist a closed trade so the post-trade audit has data to profile."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO closed_trades_ledger "
+                "(ticket_id, snapshot_hash, state_signature, regime, session, "
+                "direction, execution_profile, entry_spread_points, "
+                "realized_pnl_points, avg_latency_ms, avg_slippage_points, "
+                "final_eqd, timestamp_closed) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                (ticket_id, pos.get("snapshot_hash"),
+                 pos.get("state_signature"), pos.get("regime"),
+                 pos.get("session"), pos.get("direction"),
+                 pos.get("execution_profile"),
+                 pos.get("entry_spread_points"),
+                 realized_pnl_points, avg_latency_ms, avg_slippage_points,
+                 final_eqd, time.time())
+            )
+            conn.commit()
 
     def reconcile_state_matrices(
             self, mt5_positions: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:

@@ -99,10 +99,11 @@ def _market_structure(df: pd.DataFrame,
     bear = (1.0 if ll else 0.0) + (1.0 if lh else 0.0)
     strength = abs(bull - bear) / 2.0
 
-    abs_hi = int(sub["high"].idxmax()) if isinstance(sub.index[0], (int, np.integer)) \
-             else sub["high"].values.argmax() - (lookback + 1)
-    abs_lo = int(sub["low"].idxmin())  if isinstance(sub.index[0], (int, np.integer)) \
-             else sub["low"].values.argmin()  - (lookback + 1)
+    # Positional (iloc-compatible) offsets from the end of the parent df —
+    # idxmax()/idxmin() return LABELS, which break df.iloc[] on integer-
+    # indexed frames, so always compute positionally.
+    abs_hi = int(sub["high"].values.argmax()) - (lookback + 1)
+    abs_lo = int(sub["low"].values.argmin())  - (lookback + 1)
 
     if bull > bear:   return "BULLISH", strength, abs_hi, abs_lo
     if bear > bull:   return "BEARISH", strength, abs_hi, abs_lo
@@ -145,10 +146,38 @@ def _regime_meta(df: pd.DataFrame,
 
 # ── Integrity hash ─────────────────────────────────────────────────────────
 def _integrity_hash(snapshot: Dict[str, Any]) -> str:
-    clean = {k: v for k, v in snapshot.items() if k != "snapshot_hash"}
+    clean = {k: v for k, v in snapshot.items()
+             if k not in ("snapshot_hash", "state_signature")}
     return hashlib.sha256(
         json.dumps(clean, sort_keys=True, default=str).encode()
     ).hexdigest()
+
+
+# ── State signature (quantized — recurring across bars) ────────────────────
+def _state_signature(snapshot: Dict[str, Any]) -> str:
+    """
+    Hash of the QUANTIZED market state. Unlike snapshot_hash (which includes
+    the timestamp/price and is unique per bar), the signature buckets each
+    continuous feature so the same market regime produces the same signature
+    on different bars — this is what makes toxic-state matching possible.
+    """
+    def bucket(value: float, step: float) -> int:
+        return int(value // step)
+
+    sig = {
+        "regime":    snapshot.get("regime"),
+        "session":   snapshot.get("session"),
+        "hma":       snapshot.get("hma_trend"),
+        "hhll":      snapshot.get("hhll_bias"),
+        "rsi_b":     bucket(float(snapshot.get("rsi_14", 50.0)), 10.0),       # deciles
+        "bb_pos_b":  bucket(float(snapshot.get("bb_position", 0.5)), 0.2),    # quintiles
+        "atr_pct_b": bucket(float(snapshot.get("atr_percentile", 50.0)), 20.0),
+        "vol_b":     max(-2, min(2, bucket(float(snapshot.get("volume_z", 0.0)), 1.0))),
+        "macd_b":    max(-2, min(2, bucket(float(snapshot.get("macd_hist_z", 0.0)), 1.0))),
+    }
+    return hashlib.sha256(
+        json.dumps(sig, sort_keys=True).encode()
+    ).hexdigest()[:16]
 
 
 # ── Main class ─────────────────────────────────────────────────────────────
@@ -307,7 +336,8 @@ class FeatureEngine:
             "session":            _determine_session(current_time),
         }
 
-        snapshot["snapshot_hash"] = _integrity_hash(snapshot)
+        snapshot["snapshot_hash"]    = _integrity_hash(snapshot)
+        snapshot["state_signature"]  = _state_signature(snapshot)
         return snapshot
 
     def prompt_block(self, snap: Dict[str, Any]) -> str:

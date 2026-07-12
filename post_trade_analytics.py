@@ -29,6 +29,7 @@ CLOSED_TRADES_DDL = """
 CREATE TABLE IF NOT EXISTS closed_trades_ledger (
     ticket_id           INTEGER PRIMARY KEY,
     snapshot_hash       TEXT,
+    state_signature     TEXT,
     regime              TEXT,
     session             TEXT,
     direction           INTEGER,
@@ -47,6 +48,11 @@ def ensure_schema(db_path: str) -> None:
     """Create closed_trades_ledger if missing — safe to run on every startup."""
     with sqlite3.connect(db_path) as conn:
         conn.execute(CLOSED_TRADES_DDL)
+        cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(closed_trades_ledger)")}
+        if "state_signature" not in cols:
+            conn.execute("ALTER TABLE closed_trades_ledger "
+                         "ADD COLUMN state_signature TEXT")
         conn.commit()
 
 
@@ -176,14 +182,21 @@ class PostTradeValidationEngine:
             .to_dict(orient="index")
         )
 
-        # ── 5. Toxic snapshot hash detection ──────────────────────────────
+        # ── 5. Toxic state detection ──────────────────────────────────────
+        # Group by the quantized state_signature (recurring across bars) —
+        # snapshot_hash includes the timestamp and is unique per bar, so it
+        # can never recur and must not be used for toxicity matching.
         toxic_hashes: List[str] = []
-        if "snapshot_hash" in df.columns:
-            hash_groups = df.groupby("snapshot_hash").filter(
-                lambda x: len(x) >= 3)
+        sig_col = ("state_signature"
+                   if "state_signature" in df.columns
+                   and df["state_signature"].notna().any()
+                   else None)
+        if sig_col:
+            sig_df = df[df[sig_col].notna()]
+            hash_groups = sig_df.groupby(sig_col).filter(lambda x: len(x) >= 3)
             if not hash_groups.empty:
                 summary = (
-                    hash_groups.groupby("snapshot_hash")
+                    hash_groups.groupby(sig_col)
                     .agg(count=("realized_pnl_points", "count"),
                          net_pnl=("realized_pnl_points", "sum"))
                     .sort_values("net_pnl")
@@ -231,7 +244,8 @@ class PostTradeValidationEngine:
             "allocator_profile_efficiency": allocator_matrix,
             "hourly_pnl_distribution":   hour_pnl,
             "empirical_worst_hours_utc": worst_hours,
-            "toxic_snapshot_hashes":     toxic_hashes,
+            "toxic_state_signatures":    toxic_hashes,
+            "toxic_snapshot_hashes":     toxic_hashes,  # legacy alias
         }
 
     # ── Terminal output ────────────────────────────────────────────────────
