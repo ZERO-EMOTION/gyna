@@ -1,2 +1,17 @@
+# Python
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Secrets — NEVER commit credentials
+.env
+
+# Runtime state (SQLite + WAL sidecars)
+*.db
+*.db-wal
+*.db-shm
+memory/*.db*
+
+# Logs
+*.log
+logs/

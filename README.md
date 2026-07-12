@@ -1,7 +1,7 @@
 # PARALLAX — Gyna
 
-**Persistent Intelligence Trading System for MetaTrader 5**  
-*True Memory. Compounding AI. Never resets.*  
+**Persistent Intelligence Trading System for MetaTrader 5**
+*True Memory. Compounding AI. Never resets.*
 Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 
 ---
@@ -11,20 +11,23 @@ Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 ```
 MT5 BTCUSD M1 bars
   → FeatureEngine    (RSI, MACD, BB, HMA, HHLL, regime, session)
-  → EdgeEngine       (directional mask — Claude cannot override)
-  → ClaudeAllocator  (Anthropic / Groq / local fallback)
+  → EdgeEngine       (directional mask — the LLM cannot override)
+  → ClaudeAllocator  (Anthropic / Groq / Ollama / local fallback)
   → RiskEngine       (final authority — lot size, tier, daily halt)
-  → Stealth Execution (virtual SL/TP in SQLite, none on broker)
+  → Stealth Execution (virtual SL/TP in SQLite; broker gets only a wide emergency SL)
   → TradeMemory      (every trade logged permanently)
   → EQD Telemetry    (execution quality degrades aggression)
+  → Post-Trade Audit (closed-trades ledger → toxic-state blocklist, kill hours)
 ```
 
 **Key properties:**
 - Claude is the *allocator*, not the signal — EdgeEngine controls direction
-- Broker-authoritative PnL via MT5 deal history (not synthetic math)
-- Crash-safe: rebuilds daily loss + position state from broker on every restart
+- Broker-authoritative PnL via MT5 deal history (waits for the closing deal; synthetic tick-value fallback)
+- Crash-safe: rebuilds daily loss + position state from broker on every restart; reconciles orphaned trade-memory rows
+- Crash-proof loop: a failing frame is logged and retried, never kills the process while positions are open
 - Risk tier auto-promotes based on real win rate + profit factor
-- 20/20 unit tests passing (telemetry, risk engine, edge engine)
+- Toxic-state blocklist matches on a **quantized state signature** (recurring across bars), not the per-bar snapshot hash
+- 40/40 unit tests passing
 
 ---
 
@@ -43,17 +46,26 @@ python main.py
 
 ## Configuration
 
-Edit  or set via :
+Set via `.env` (see `.env.example`) or environment variables:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-|  | — | ICMarkets account number |
-|  | ICMarketsSC-Demo | Broker server |
-|  | — | Claude API key |
-|  | — | Optional Groq fallback |
-|  | anthropic |  /  /  |
-|  | 0.05 | 5% daily halt |
-|  | 1 | BTCUSD concentration |
+| `MT5_LOGIN` | — | ICMarkets account number |
+| `MT5_PASSWORD` | — | Account password |
+| `MT5_SERVER` | `ICMarketsSC-Demo` | Broker server |
+| `LLM_PROVIDER` | `anthropic` | `anthropic` / `groq` / `ollama` — falls through groq → anthropic → local |
+| `ANTHROPIC_API_KEY` | — | Claude API key |
+| `MODEL` | `claude-sonnet-5` | Anthropic model ID |
+| `GROQ_API_KEY` | — | Optional Groq fallback (free tier) |
+| `OLLAMA_URL` / `OLLAMA_MODEL` | `localhost:11434` / `qwen2.5:14b` | Optional local LLM |
+
+Trading constants (risk tiers, daily halt, cooldowns) live in `config.py`:
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `MAX_RISK_PER_TRADE` | 0.25% | Hard per-trade risk cap |
+| `MAX_DAILY_LOSS` | 5% | Daily drawdown breaker |
+| `MAX_OPEN_POSITIONS` | 1 | BTCUSD concentration — no hedging |
 
 ---
 
@@ -61,19 +73,23 @@ Edit  or set via :
 
 | File | Role |
 |------|------|
-|  | Entry point |
-|  | 50ms loop supervisor — full execution pipeline |
-|  | All constants + risk tiers |
-|  | Causal OHLCV → FeatureSnapshot (no repaint) |
-|  | ADX + BB + Choppiness → TREND/RANGE/VOLATILE |
-|  | Deterministic directional mask + quality score |
-|  | Multi-provider LLM allocator (Anthropic/Groq/local) |
-|  | Final authority — lot sizing, gates, tier promotion |
-|  | Latency + slippage → EQD coefficient |
-|  | SQLite WAL live position state + telemetry buffer |
-|  | Post-session audit — regime/session/hash analysis |
-|  | Thin MT5 connection wrapper |
-|  | Permanent trade memory — never deletes |
+| `main.py` | Entry point |
+| `main_orchestrator.py` | 50ms loop supervisor — full execution pipeline |
+| `config.py` | All constants + risk tiers (env-overridable LLM settings) |
+| `feature_engine.py` | Causal OHLCV → FeatureSnapshot (no repaint) + quantized state signature |
+| `regime_engine.py` | ADX + BB + Choppiness → TREND/RANGE/VOLATILE |
+| `edge_engine.py` | Deterministic directional mask + quality score |
+| `claude_allocator.py` | Multi-provider LLM allocator (Anthropic/Groq/Ollama/local) |
+| `risk_engine.py` | Final authority — lot sizing, gates, tier promotion |
+| `execution_telemetry.py` | Latency + slippage → EQD coefficient |
+| `state_manager.py` | SQLite WAL live position state + closed-trades ledger + telemetry buffer |
+| `post_trade_analytics.py` | Post-session audit — regime/session/toxic-state analysis |
+| `mt5_bridge.py` | Thin MT5 connection wrapper |
+| `memory/trade_log.py` | Permanent trade memory — never deletes |
+
+Databases: `memory/gyna_trades.db` (permanent trade memory) and
+`memory/system_state.db` (live stealth positions, telemetry, closed-trades ledger)
+are intentionally separate files.
 
 ---
 
@@ -89,7 +105,29 @@ Edit  or set via :
 
 ---
 
-## Hardening Audit
+## Tests
 
- — All 7 priorities implemented.  
-Live readiness grade: **B+ execution safety** → A- after forward test logs.
+```bash
+python -m pytest tests/ -q
+```
+
+Covers: edge engine, risk engine, execution telemetry, trade memory
+(close-by-ticket, orphan reconciliation), state manager (locking, schema
+migration, closed-trades ledger), feature engine (state-signature recurrence),
+and post-trade analytics (toxic-state detection).
+
+---
+
+## Hardening History
+
+- `docs/GYNA_HARDENING_AUDIT_001.md` — priorities 1–7 (latency telemetry,
+  risk-context plumbing, broker-authoritative PnL, day anchor, emergency SL).
+- **2026-07-12 audit remediation** — restored the missing
+  `close_trade_by_ticket()` (fatal AttributeError on every stealth close),
+  wired the closed-trades ledger (analytics/toxic-blocklist were inert),
+  introduced the quantized state signature (per-bar snapshot hashes can never
+  recur), fixed the broker-PnL race (`None` sentinel + close-deal wait +
+  tick-value synthetic fallback), day-rollover breaker reset, clock-skew-immune
+  feed watchdog, crash-proof frame loop, boot-time orphan reconciliation,
+  split state/trade DBs, env-driven provider/model config, `.gitignore`
+  hardening, and 20 new unit tests.
