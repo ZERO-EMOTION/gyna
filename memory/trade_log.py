@@ -151,6 +151,42 @@ class TradeMemory:
         self.conn.commit()
         self._update_daily_stats(pnl_usd)
 
+    def close_trade_by_ticket(self, mt5_ticket: int, exit_price: float,
+                              pnl_pips: float, pnl_usd: float,
+                              outcome: str) -> bool:
+        """Close the most recent OPEN trade carrying this MT5 ticket.
+
+        The orchestrator only knows the broker ticket, not the SQLite row id.
+        Returns False (without touching daily stats) when no open trade
+        matches — e.g. a position imported from the terminal that was never
+        logged here.
+        """
+        row = self.conn.execute('''
+            SELECT id FROM trades
+            WHERE mt5_ticket=? AND outcome='open'
+            ORDER BY id DESC LIMIT 1
+        ''', (mt5_ticket,)).fetchone()
+        if row is None:
+            return False
+        self.close_trade(row["id"], exit_price, pnl_pips, pnl_usd, outcome)
+        return True
+
+    def get_open_tickets(self) -> list[int]:
+        """MT5 tickets of all trades still marked open (for boot reconciliation)."""
+        cur = self.conn.execute(
+            "SELECT mt5_ticket FROM trades "
+            "WHERE outcome='open' AND mt5_ticket IS NOT NULL")
+        return [int(r[0]) for r in cur.fetchall()]
+
+    def mark_trade_orphaned(self, mt5_ticket: int):
+        """Flag an open trade whose position vanished and whose PnL is unrecoverable."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute('''
+            UPDATE trades SET outcome='orphaned', closed_at=?
+            WHERE mt5_ticket=? AND outcome='open'
+        ''', (now, mt5_ticket))
+        self.conn.commit()
+
     def _update_daily_stats(self, pnl_usd: float):
         today = datetime.now(timezone.utc).date().isoformat()
         self.conn.execute('''
