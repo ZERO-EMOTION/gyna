@@ -77,6 +77,10 @@ class ExecutionTelemetry:
 
         return {"status": "PROFILED", "metrics": metrics}
 
+    def current_metrics(self) -> Dict[str, Any]:
+        """Public snapshot of rolling execution-quality metrics."""
+        return self._current_metrics()
+
     def _current_metrics(self) -> Dict[str, Any]:
         import numpy as np
 

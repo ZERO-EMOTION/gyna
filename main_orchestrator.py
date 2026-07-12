@@ -31,7 +31,7 @@ import MetaTrader5 as mt5
 
 from config import (
     NAME, VERSION, SYMBOLS, CYCLE_MINUTES, KILL_HOURS_UTC,
-    MAX_OPEN_POSITIONS, DB_PATH, SIMILAR_TRADES_K, RECENT_LOSSES_N,
+    MAX_OPEN_POSITIONS, DB_PATH, STATE_DB_PATH, RECENT_LOSSES_N,
     RISK_TIERS, USE_BROKER_EMERGENCY_SL, EMERGENCY_SL_MULTIPLIER,
     MAX_DAILY_LOSS,
 )
@@ -82,17 +82,19 @@ def _validate_env():
         log.critical(f"Missing required .env variables: {missing}")
         log.critical("Copy .env.example to .env and fill in credentials")
         exit(1)
-    log.info(f"✅ Environment validated | MT5: {MT5_SERVER} #{MT5_LOGIN}")
+    log.info(f"[OK] Environment validated | MT5: {MT5_SERVER} #{MT5_LOGIN}")
 
 
 class GynaSystemOrchestrator:
     def __init__(self):
         # ── Core engines ───────────────────────────────────────────────────
-        self.state_db    = StateManager(DB_PATH)
-        self.memory      = TradeMemory(DB_PATH.replace("system_state", "gyna_trades")
-                                       if "system_state" in DB_PATH else "memory/gyna_trades.db")
+        # Live state and trade memory live in SEPARATE SQLite files —
+        # StateManager uses WAL/per-call connections, TradeMemory holds a
+        # persistent connection; sharing one file risks lock contention.
+        self.state_db    = StateManager(STATE_DB_PATH)
+        self.memory      = TradeMemory(DB_PATH)
         self.telemetry   = ExecutionTelemetry(tracking_window=20)
-        self.analytics   = PostTradeValidationEngine(DB_PATH)
+        self.analytics   = PostTradeValidationEngine(STATE_DB_PATH)
         self.features    = FeatureEngine(SYMBOL, "M1")
         self.edge        = EdgeEngine(fatigue_threshold_bars=48)
         self.allocator   = ClaudeAllocator()
@@ -120,6 +122,10 @@ class GynaSystemOrchestrator:
         self.day_start_equity:  float = 0.0
         self.daily_realized_pnl: float = 0.0
 
+        # ── Feed staleness tracking (clock-skew immune) ─────────────────────
+        self._last_tick_msc:    int   = 0
+        self._last_tick_change: float = time.monotonic()
+
     # ── Terminal watchdog ──────────────────────────────────────────────────
 
     def enforce_terminal_watchdog(self) -> bool:
@@ -138,7 +144,13 @@ class GynaSystemOrchestrator:
             log.error(f"[WATCHDOG] Cannot fetch tick for {SYMBOL}")
             return False
 
-        staleness = now - tick.time_msc / 1000.0
+        # Staleness = local monotonic time since the tick value last CHANGED.
+        # Comparing tick.time_msc against local wall-clock false-triggers on
+        # broker/VPS clock skew; monotonic change-tracking is skew-immune.
+        if tick.time_msc != self._last_tick_msc:
+            self._last_tick_msc    = tick.time_msc
+            self._last_tick_change = time.monotonic()
+        staleness = time.monotonic() - self._last_tick_change
         if staleness > MAX_FEED_STALENESS_S and self._is_market_active():
             log.critical(f"[WATCHDOG] Feed stale {staleness:.2f}s — suspending loop")
             return False
@@ -166,27 +178,43 @@ class GynaSystemOrchestrator:
     # ── P3: Broker-authoritative realized PnL for a closed position ───────
 
     def _realized_pnl_for_position(self, position_id: int,
-                                   lookback_days: int = 7) -> float:
+                                   lookback_days: int = 7,
+                                   retries: int = 3,
+                                   retry_delay_s: float = 0.4):
         """
-        Query MT5 deal history to get true broker-reported PnL for a position.
-        Includes profit + commission + swap + fee.
-        Falls back to 0.0 if history unavailable (fails safe).
+        Query MT5 deal history for the true broker-reported PnL of a position
+        (profit + commission + swap + fee across all its deals).
+
+        Returns None — NOT 0.0 — when the CLOSING deal (DEAL_ENTRY_OUT) has
+        not yet appeared in history. The close deal can lag order_send by a
+        few hundred ms; summing only the entry deal would return the entry
+        commission (a small negative number) and silently record a wrong PnL.
+        Retries briefly before giving up so the caller can fall back to a
+        synthetic estimate.
         """
         from datetime import datetime, timedelta, timezone
-        utc_to   = datetime.now(timezone.utc)
-        utc_from = utc_to - timedelta(days=lookback_days)
-        deals = mt5.history_deals_get(utc_from, utc_to)
-        if deals is None:
-            log.warning(f"[PNL] MT5 deals unavailable for ticket {position_id}")
-            return 0.0
-        total = 0.0
-        for d in deals:
-            if int(getattr(d, "position_id", -1)) == int(position_id):
-                total += float(getattr(d, "profit", 0.0))
-                total += float(getattr(d, "commission", 0.0))
-                total += float(getattr(d, "swap", 0.0))
-                total += float(getattr(d, "fee", 0.0))
-        return total
+        for attempt in range(retries):
+            utc_to   = datetime.now(timezone.utc)
+            utc_from = utc_to - timedelta(days=lookback_days)
+            deals = mt5.history_deals_get(utc_from, utc_to)
+            if deals is not None:
+                total = 0.0
+                close_seen = False
+                for d in deals:
+                    if int(getattr(d, "position_id", -1)) == int(position_id):
+                        total += float(getattr(d, "profit", 0.0))
+                        total += float(getattr(d, "commission", 0.0))
+                        total += float(getattr(d, "swap", 0.0))
+                        total += float(getattr(d, "fee", 0.0))
+                        if getattr(d, "entry", -1) == mt5.DEAL_ENTRY_OUT:
+                            close_seen = True
+                if close_seen:
+                    return total
+            if attempt < retries - 1:
+                time.sleep(retry_delay_s)
+        log.warning(f"[PNL] Close deal for position {position_id} not in "
+                    f"history after {retries} attempts")
+        return None
 
     # ── P4: Rebuild daily loss from MT5 deal history ───────────────────────
 
@@ -200,14 +228,16 @@ class GynaSystemOrchestrator:
         now       = datetime.now(timezone.utc)
         today_str = now.date().isoformat()
 
-        # Day rollover
+        # Day rollover — reset the anchor, then FALL THROUGH to recompute.
+        # Returning early here would leave daily_loss_pct at yesterday's
+        # value for the first allocation of the new day.
         if today_str != self.day_anchor_date:
             account = mt5.account_info()
             self.day_anchor_date  = today_str
             self.day_start_equity = float(account.equity) if account else 0.0
             self.daily_realized_pnl = 0.0
+            self.daily_loss_pct     = 0.0
             log.info(f"[DAYANCHOR] New day {today_str} | start equity={self.day_start_equity:.2f}")
-            return
 
         # Recompute realized PnL from history deals since day start
         from datetime import timedelta
@@ -313,12 +343,12 @@ class GynaSystemOrchestrator:
         self.telemetry.slippage_pts = hist.get("slippage", [])
         self.current_eqd            = hist.get("avg_eqd", 0.0)
 
-        # Load toxic hash blocklist
+        # Load toxic state-signature blocklist
         try:
             report = self.analytics.generate_report(days=30)
             if report.get("status") == "PROFILED":
-                self.toxic_hashes = report.get("toxic_snapshot_hashes", [])
-                log.info(f"[BOOT] Toxic blocklist: {len(self.toxic_hashes)} hashes")
+                self.toxic_hashes = report.get("toxic_state_signatures", [])
+                log.info(f"[BOOT] Toxic blocklist: {len(self.toxic_hashes)} signatures")
         except Exception as e:
             log.warning(f"[BOOT] Analytics skip: {e}")
 
@@ -343,6 +373,25 @@ class GynaSystemOrchestrator:
                     self.state_db.remove_stealth_position(tid)
                 elif action["action"] == "FORCE_IMPORT_REBUILD":
                     self.state_db.register_stealth_position(tid, action["payload"])
+
+        # Reconcile trade-memory rows stuck 'open' (e.g. after a crash):
+        # if the position is gone from the terminal, close the row from
+        # broker history or flag it orphaned so tier stats stay honest.
+        for stale_ticket in self.memory.get_open_tickets():
+            if stale_ticket in terminal_pos:
+                continue
+            realized = self._realized_pnl_for_position(stale_ticket, retries=1)
+            if realized is not None:
+                self.memory.close_trade_by_ticket(
+                    mt5_ticket=stale_ticket, exit_price=0.0,
+                    pnl_pips=0.0, pnl_usd=realized,
+                    outcome="loss" if realized < 0 else "win")
+                log.info(f"[BOOT] Recovered stale trade {stale_ticket} "
+                         f"from history: ${realized:+.2f}")
+            else:
+                self.memory.mark_trade_orphaned(stale_ticket)
+                log.warning(f"[BOOT] Trade {stale_ticket} orphaned — "
+                            f"no close deal in broker history")
 
         # P4: rebuild daily loss from broker history on startup
         self._rebuild_daily_loss_from_history()
@@ -411,18 +460,22 @@ class GynaSystemOrchestrator:
                     self.state_db.remove_stealth_position(ticket)
                     self.cached_positions.pop(ticket, None)
 
-                    is_loss = loss_pts >= adj_sl
+                    is_loss    = loss_pts >= adj_sl
+                    exit_price = float(getattr(result, "price", 0.0)) or close_price
+                    tick_value = float(getattr(sym_info, "trade_tick_value", 0.0)) or 1.0
 
-                    # P3: use broker-authoritative PnL from deal history
+                    # P3: broker-authoritative PnL (None until close deal lands)
                     realized_usd = self._realized_pnl_for_position(ticket)
-                    # Fallback to synthetic if history unavailable (0.0 returned)
-                    if realized_usd == 0.0:
-                        pnl_pts     = -loss_pts if is_loss else profit_pts
-                        realized_usd = pnl_pts * float(pos["volume"])
+                    if realized_usd is None:
+                        # Synthetic estimate: points × tick_value × lots
+                        pnl_pts      = -loss_pts if is_loss else profit_pts
+                        realized_usd = pnl_pts * tick_value * float(pos["volume"])
                         log.warning(f"[STEALTH] {ticket} PnL from history unavailable "
                                     f"— using synthetic {realized_usd:.2f}")
                     else:
-                        pnl_pts = realized_usd / max(float(pos["volume"]), 1e-10)
+                        is_loss = realized_usd < 0  # broker truth overrides tick math
+                        pnl_pts = realized_usd / max(
+                            tick_value * float(pos["volume"]), 1e-10)
 
                     self.consecutive_losses = (self.consecutive_losses + 1
                                                if is_loss else 0)
@@ -430,12 +483,23 @@ class GynaSystemOrchestrator:
                         self.consecutive_losses, self.daily_loss_pct)
 
                     # Log to trade memory
-                    self.memory.close_trade_by_ticket(
+                    if not self.memory.close_trade_by_ticket(
                         mt5_ticket=ticket,
-                        exit_price=close_price,
+                        exit_price=exit_price,
                         pnl_pips=pnl_pts,
                         pnl_usd=realized_usd,
                         outcome="loss" if is_loss else "win",
+                    ):
+                        log.warning(f"[STEALTH] {ticket} not found in trade memory")
+
+                    # Feed the post-trade analytics ledger
+                    tel = self.telemetry.current_metrics()
+                    self.state_db.record_closed_trade(
+                        ticket, pos,
+                        realized_pnl_points=pnl_pts,
+                        avg_latency_ms=tel["rolling_avg_latency_ms"],
+                        avg_slippage_points=tel["rolling_avg_slippage_points"],
+                        final_eqd=tel["execution_quality_degradation"],
                     )
                     log.info(f"[STEALTH] {ticket} closed {'LOSS' if is_loss else 'WIN'} "
                              f"pnl=${realized_usd:+.2f}")
@@ -526,10 +590,10 @@ class GynaSystemOrchestrator:
             log.info(f"[BAR] Direction {direction} already executed on this bar")
             return
 
-        # ── Toxic hash soft-block ──────────────────────────────────────────
+        # ── Toxic state soft-block (quantized signature, recurs across bars) ─
         toxicity_scalar = 1.0
-        if snap.get("snapshot_hash") in self.toxic_hashes:
-            log.warning("[TOXIC] Snapshot hash in blocklist — 50% aggression penalty")
+        if snap.get("state_signature") in self.toxic_hashes:
+            log.warning("[TOXIC] State signature in blocklist — 50% aggression penalty")
             toxicity_scalar = 0.50
 
         # ── Claude allocation ──────────────────────────────────────────────
@@ -632,6 +696,10 @@ class GynaSystemOrchestrator:
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             err = getattr(result, "retcode", "TIMEOUT")
             log.error(f"[EXEC] Order failed: {err}")
+            self.telemetry.log_transaction(
+                {**auth, "timestamp_sent": t_sent_wall,
+                 "timestamp_sent_perf": t_sent_perf},
+                {"execution_successful": False})
             return
 
         ticket     = int(result.order)
@@ -663,16 +731,22 @@ class GynaSystemOrchestrator:
             self.current_eqd,
         )
 
-        # Stealth position registration
+        # Stealth position registration — carries entry context so the
+        # closed-trades ledger can profile regime/session/spread later
         pos_details = {
-            "symbol":            SYMBOL,
-            "direction":         direction,
-            "volume":            float(params["volume"]),
-            "entry_price":       fill_price,
-            "virtual_sl_points": params["virtual_sl_points"],
-            "virtual_tp_points": params["virtual_tp_points"],
-            "snapshot_hash":     auth.get("snapshot_hash", ""),
-            "timestamp_opened":  t_sent_wall,
+            "symbol":              SYMBOL,
+            "direction":           direction,
+            "volume":              float(params["volume"]),
+            "entry_price":         fill_price,
+            "virtual_sl_points":   params["virtual_sl_points"],
+            "virtual_tp_points":   params["virtual_tp_points"],
+            "snapshot_hash":       auth.get("snapshot_hash", ""),
+            "state_signature":     snap.get("state_signature", ""),
+            "regime":              snap.get("regime"),
+            "session":             snap.get("session"),
+            "execution_profile":   allocation.get("execution_profile"),
+            "entry_spread_points": float(sym_info.spread),
+            "timestamp_opened":    t_sent_wall,
         }
         self.state_db.register_stealth_position(ticket, pos_details)
 
@@ -708,7 +782,7 @@ class GynaSystemOrchestrator:
         })
 
         log.info(
-            f"[EXEC] ✅ Ticket={ticket} {'BUY' if direction==1 else 'SELL'} "
+            f"[EXEC] FILLED Ticket={ticket} {'BUY' if direction==1 else 'SELL'} "
             f"{params['volume']}lot @ {fill_price:.2f} | "
             f"SL={params['virtual_sl_points']}pts TP={params['virtual_tp_points']}pts | "
             f"Tier={auth.get('risk_tier')} risk={auth.get('risk_pct',0)*100:.2f}% | "
@@ -733,38 +807,57 @@ class GynaSystemOrchestrator:
 
     def run(self) -> None:
         self.system_rehydration_barrier()
-        log.info("[IGNITION] 🚀 Gyna live — 50ms monotonic loop active")
+        log.info("[IGNITION] Gyna live — 50ms monotonic loop active")
 
         cadence       = LOOP_CADENCE_S
         next_frame    = time.perf_counter()
         bar_interval  = CYCLE_MINUTES * 60.0
 
+        consecutive_frame_errors = 0
         try:
             while True:
                 now_perf = time.perf_counter()
 
                 if now_perf >= next_frame:
-                    # Watchdog
-                    if not self.enforce_terminal_watchdog():
-                        next_frame = now_perf + cadence
-                        continue
+                    # Crash-proof frame: one bad cycle must not kill the bot
+                    # while positions may be open (virtual SL/TP lives here).
+                    try:
+                        # Watchdog
+                        if not self.enforce_terminal_watchdog():
+                            next_frame = now_perf + cadence
+                            continue
 
-                    # Position cache
-                    self.update_position_cache()
+                        # Position cache
+                        self.update_position_cache()
 
-                    # Tick telemetry (stealth exits)
-                    tick = mt5.symbol_info_tick(SYMBOL)
-                    if tick is not None:
-                        self.process_tick_telemetry(tick)
+                        # Tick telemetry (stealth exits)
+                        tick = mt5.symbol_info_tick(SYMBOL)
+                        if tick is not None:
+                            self.process_tick_telemetry(tick)
 
-                    # Bar allocation (monotonic gate)
-                    elapsed = time.time() - self.last_allocation_ts
-                    if int(elapsed) % 5 == 0 and int(elapsed) > 0:
-                        log.info(f"[LOOP] Waiting for bar: {elapsed:.0f}s / {bar_interval:.0f}s | positions={len(self.cached_positions)}")
-                    if elapsed >= bar_interval:
-                        log.info("[LOOP] BAR CYCLE FIRING NOW")
-                        self.process_bar_allocation_cycle()
-                        self.last_allocation_ts = time.time()
+                        # Bar allocation (monotonic gate)
+                        elapsed = time.time() - self.last_allocation_ts
+                        if int(elapsed) % 5 == 0 and int(elapsed) > 0:
+                            log.info(f"[LOOP] Waiting for bar: {elapsed:.0f}s / {bar_interval:.0f}s | positions={len(self.cached_positions)}")
+                        if elapsed >= bar_interval:
+                            log.info("[LOOP] BAR CYCLE FIRING NOW")
+                            self.process_bar_allocation_cycle()
+                            self.last_allocation_ts = time.time()
+
+                        consecutive_frame_errors = 0
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        import traceback
+                        consecutive_frame_errors += 1
+                        log.error(f"[LOOP] Frame error "
+                                  f"#{consecutive_frame_errors}:\n"
+                                  f"{traceback.format_exc()}")
+                        if consecutive_frame_errors >= 100:
+                            log.critical("[LOOP] 100 consecutive frame errors "
+                                         "— structural failure, shutting down")
+                            raise
+                        time.sleep(1.0)
 
                     next_frame += cadence
                     # Drift correction
@@ -778,7 +871,7 @@ class GynaSystemOrchestrator:
         finally:
             self.state_db.flush_telemetry_buffer()
             mt5.shutdown()
-            log.info("[SHUTDOWN] Gyna offline. Telemetry synchronized. 🛑")
+            log.info("[SHUTDOWN] Gyna offline. Telemetry synchronized.")
 
 
 if __name__ == "__main__":
