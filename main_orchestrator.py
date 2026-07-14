@@ -629,12 +629,16 @@ class GynaSystemOrchestrator:
             "win_rate_calibrated":  mem_stats.get("win_rate", 0.0),
         }
 
-        # ── Edge engine (directional mask) ─────────────────────────────────
-        masked = self.edge.process_state(snap, perf_ctx)
+        # ── Edge engine: both styles evaluated, learned arbitration ────────
+        masked = self.edge.process_state(
+            snap, perf_ctx, style_stats=self.memory.get_style_stats())
 
         direction = int(masked.get("permitted_direction", 0))
         if direction == 0:
             return
+        style = masked.get("style")
+        log.info(f"[EDGE] style={style} setup={masked.get('style_setup')} "
+                 f"dir={direction} quality={masked.get('edge_quality_score')}")
 
         # ── Bar execution lock ─────────────────────────────────────────────
         bar_key = (SYMBOL, direction, current_bar_time)
@@ -799,6 +803,7 @@ class GynaSystemOrchestrator:
             "session":             snap.get("session"),
             "execution_profile":   allocation.get("execution_profile"),
             "entry_spread_points": float(sym_info.spread),
+            "style":               style,
             "timestamp_opened":    t_sent_wall,
         }
         self.state_db.register_stealth_position(ticket, pos_details)
@@ -831,6 +836,7 @@ class GynaSystemOrchestrator:
             "risk_tier":    auth.get("risk_tier"),
             "risk_pct":     auth.get("risk_pct"),
             "mt5_ticket":   ticket,
+            "style":        style,
             "outcome":      "open",
         })
 
@@ -842,7 +848,8 @@ class GynaSystemOrchestrator:
             f"EQD={self.current_eqd:.3f} slip={slippage:+.1f}pts"
         )
         self.notifier.send(
-            f"Gyna opened #{ticket}: {'BUY' if direction == 1 else 'SELL'} "
+            f"Gyna opened #{ticket} [{style}]: "
+            f"{'BUY' if direction == 1 else 'SELL'} "
             f"{params['volume']} lot @ {fill_price:.2f} | "
             f"{snap.get('regime')}/{snap.get('session')} | "
             f"Tier {auth.get('risk_tier')} "

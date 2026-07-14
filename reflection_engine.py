@@ -24,12 +24,16 @@ REFLECTION_SYSTEM_PROMPT = """You are the weekly self-review module of Gyna, an 
 
 You will receive the week's closed trades and aggregate stats. Write a reflection that a risk-allocation engine can act on next week. Be specific and quantitative, never generic.
 
+The system trades TWO styles: "scalper" (price-action bursts/sweeps, quick
+~1.5R) and "runner" (trend rides, 3R+ targets). Compare them.
+
 Cover, in order:
-1. What worked: regimes/sessions/setups with positive expectancy this week.
-2. What failed: recurring losing patterns (state, session, hour, overtrading after losses).
-3. One concrete behavioral adjustment for next week, phrased as a rule
-   (e.g. "reduce aggression to <=0.3 in RANGE regime during ASIA").
-4. Anything the win-rate/PF trend implies about the current risk tier.
+1. What worked: styles/regimes/sessions/setups with positive expectancy this week.
+2. What failed: recurring losing patterns (style, state, session, hour, overtrading after losses).
+3. Which style earned its risk this week and which did not — with numbers.
+4. One concrete behavioral adjustment for next week, phrased as a rule
+   (e.g. "reduce scalper aggression to <=0.3 during ASIA").
+5. Anything the win-rate/PF trend implies about the current risk tier.
 
 Maximum 250 words. Plain text, no markdown headers."""
 
@@ -85,11 +89,12 @@ class ReflectionEngine:
             f"Win rate: {wr:.1%} | Profit factor: {pf:.2f} | "
             f"Net PnL: ${gp - gl:+.2f}",
             "",
-            "TRADES (time | dir | regime | session | pnl | entry rationale):",
+            "TRADES (time | style | dir | regime | session | pnl | entry rationale):",
         ]
         for t in trades[-40:]:   # cap prompt size
             lines.append(
-                f"{str(t['timestamp'])[:16]} | {t['direction']} | "
+                f"{str(t['timestamp'])[:16]} | {t.get('style') or '?'} | "
+                f"{t['direction']} | "
                 f"{t.get('regime')} | {t.get('session')} | "
                 f"${(t['pnl_usd'] or 0):+.2f} | "
                 f"{str(t.get('rationale') or '')[:100]}")

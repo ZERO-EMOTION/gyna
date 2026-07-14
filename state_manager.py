@@ -58,7 +58,8 @@ class StateManager:
                 session             TEXT,
                 execution_profile   TEXT,
                 entry_spread_points REAL,
-                state_signature     TEXT
+                state_signature     TEXT,
+                style               TEXT
             );""",
             """CREATE TABLE IF NOT EXISTS telemetry_ledger (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +81,8 @@ class StateManager:
                 avg_latency_ms      REAL,
                 avg_slippage_points REAL,
                 final_eqd           REAL,
-                timestamp_closed    REAL
+                timestamp_closed    REAL,
+                style               TEXT
             );""",
         ]
         with self._get_connection() as conn:
@@ -92,15 +94,17 @@ class StateManager:
             for col, dtype in (("regime", "TEXT"), ("session", "TEXT"),
                                ("execution_profile", "TEXT"),
                                ("entry_spread_points", "REAL"),
-                               ("state_signature", "TEXT")):
+                               ("state_signature", "TEXT"),
+                               ("style", "TEXT")):
                 if existing and col not in existing:
                     conn.execute(f"ALTER TABLE active_stealth_positions "
                                  f"ADD COLUMN {col} {dtype}")
             ledger_cols = {row[1] for row in
                            conn.execute("PRAGMA table_info(closed_trades_ledger)")}
-            if ledger_cols and "state_signature" not in ledger_cols:
-                conn.execute("ALTER TABLE closed_trades_ledger "
-                             "ADD COLUMN state_signature TEXT")
+            for col in ("state_signature", "style"):
+                if ledger_cols and col not in ledger_cols:
+                    conn.execute(f"ALTER TABLE closed_trades_ledger "
+                                 f"ADD COLUMN {col} TEXT")
             conn.commit()
 
     # ── System context ─────────────────────────────────────────────────────
@@ -139,8 +143,9 @@ class StateManager:
                 "(ticket_id, symbol, direction, volume, entry_price, "
                 "virtual_sl_points, virtual_tp_points, snapshot_hash, "
                 "timestamp_opened, operational_state, regime, session, "
-                "execution_profile, entry_spread_points, state_signature) "
-                "VALUES (?,?,?,?,?,?,?,?,?,'OPEN',?,?,?,?,?);",
+                "execution_profile, entry_spread_points, state_signature, "
+                "style) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?);",
                 (ticket_id, pos["symbol"], pos["direction"], pos["volume"],
                  pos["entry_price"], pos["virtual_sl_points"],
                  pos["virtual_tp_points"], pos["snapshot_hash"],
@@ -148,7 +153,8 @@ class StateManager:
                  pos.get("regime"), pos.get("session"),
                  pos.get("execution_profile"),
                  pos.get("entry_spread_points"),
-                 pos.get("state_signature"))
+                 pos.get("state_signature"),
+                 pos.get("style"))
             )
             conn.commit()
 
@@ -209,15 +215,15 @@ class StateManager:
                 "(ticket_id, snapshot_hash, state_signature, regime, session, "
                 "direction, execution_profile, entry_spread_points, "
                 "realized_pnl_points, avg_latency_ms, avg_slippage_points, "
-                "final_eqd, timestamp_closed) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?);",
+                "final_eqd, timestamp_closed, style) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
                 (ticket_id, pos.get("snapshot_hash"),
                  pos.get("state_signature"), pos.get("regime"),
                  pos.get("session"), pos.get("direction"),
                  pos.get("execution_profile"),
                  pos.get("entry_spread_points"),
                  realized_pnl_points, avg_latency_ms, avg_slippage_points,
-                 final_eqd, time.time())
+                 final_eqd, time.time(), pos.get("style"))
             )
             conn.commit()
 

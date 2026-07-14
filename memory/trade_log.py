@@ -50,6 +50,7 @@ class TradeMemory:
                 risk_pct      REAL,             -- actual risk used
                 outcome       TEXT DEFAULT 'open', -- win | loss | be | open
                 mt5_ticket    INTEGER,          -- broker ticket number
+                style         TEXT,             -- scalper | runner
                 reflection    TEXT,             -- added by weekly reflection engine
                 closed_at     TEXT              -- timestamp when position closed
             );
@@ -91,6 +92,7 @@ class TradeMemory:
             "closed_at":    "TEXT",
             "macd_hist":    "REAL",
             "atr":          "REAL",
+            "style":        "TEXT",
         }
         for col, dtype in new_cols.items():
             if col not in existing:
@@ -108,8 +110,9 @@ class TradeMemory:
                 sl, tp, sl_atr_mult, tp_atr_mult,
                 rationale, regime, session,
                 rsi, macd_hist, bb_position, hma_trend, atr, hhll_bias,
-                confidence, key_risk, risk_tier, risk_pct, outcome, mt5_ticket
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                confidence, key_risk, risk_tier, risk_pct, outcome, mt5_ticket,
+                style
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             now,
             data.get("symbol", "BTCUSD"),
@@ -135,6 +138,7 @@ class TradeMemory:
             data.get("risk_pct"),
             data.get("outcome", "open"),
             data.get("mt5_ticket"),
+            data.get("style"),
         ))
         self.conn.commit()
         return cur.lastrowid
@@ -252,6 +256,34 @@ class TradeMemory:
             "profit_factor": gp / gl,
             "net_pnl":       row["net_pnl"] or 0.0,
         }
+
+    def get_style_stats(self) -> dict:
+        """Per-style live performance — feeds the EdgeEngine's learned
+        arbitration between scalper and runner."""
+        cur = self.conn.execute("""
+            SELECT
+                style,
+                COUNT(*)                                            AS total,
+                SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END)      AS wins,
+                SUM(CASE WHEN pnl_usd > 0 THEN pnl_usd ELSE 0 END)  AS gp,
+                SUM(CASE WHEN pnl_usd < 0 THEN ABS(pnl_usd) ELSE 0 END) AS gl,
+                SUM(pnl_usd)                                        AS net
+            FROM trades
+            WHERE outcome IN ('win','loss','be') AND style IS NOT NULL
+            GROUP BY style
+        """)
+        stats = {}
+        for row in cur.fetchall():
+            total = row["total"] or 0
+            gl    = row["gl"] or 0
+            stats[row["style"]] = {
+                "total_trades":  total,
+                "win_rate":      (row["wins"] or 0) / total if total else 0.0,
+                "profit_factor": (row["gp"] or 0) / gl if gl > 0 else
+                                 float("inf") if (row["gp"] or 0) > 0 else 0.0,
+                "net_pnl":       row["net"] or 0.0,
+            }
+        return stats
 
     def get_daily_pnl(self, date: Optional[str] = None) -> float:
         """Return today's PnL in USD."""

@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS closed_trades_ledger (
     avg_latency_ms      REAL,
     avg_slippage_points REAL,
     final_eqd           REAL,
-    timestamp_closed    REAL
+    timestamp_closed    REAL,
+    style               TEXT
 );
 """
 
@@ -50,9 +51,10 @@ def ensure_schema(db_path: str) -> None:
         conn.execute(CLOSED_TRADES_DDL)
         cols = {row[1] for row in conn.execute(
             "PRAGMA table_info(closed_trades_ledger)")}
-        if "state_signature" not in cols:
-            conn.execute("ALTER TABLE closed_trades_ledger "
-                         "ADD COLUMN state_signature TEXT")
+        for col in ("state_signature", "style"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE closed_trades_ledger "
+                             f"ADD COLUMN {col} TEXT")
         conn.commit()
 
 
@@ -129,6 +131,26 @@ class PostTradeValidationEngine:
             .round(3)
             .to_dict(orient="index")
         )
+
+        # ── 1b. Style expectancy (scalper vs runner) ───────────────────────
+        if "style" in df.columns and df["style"].notna().any():
+            style_df = df[df["style"].notna()]
+            style_matrix = (
+                style_df.groupby("style")
+                .agg(
+                    trade_count=("realized_pnl_points", "count"),
+                    win_rate=("is_win", "mean"),
+                    avg_pnl=("realized_pnl_points", "mean"),
+                    net_pnl=("realized_pnl_points", "sum"),
+                )
+                .assign(profit_factor=lambda d: d.index.map(
+                    lambda k: _pf(style_df.loc[style_df["style"] == k,
+                                               "realized_pnl_points"])))
+                .round(3)
+                .to_dict(orient="index")
+            )
+        else:
+            style_matrix = {}
 
         # ── 2. Regime expectancy ───────────────────────────────────────────
         regime_matrix = (
@@ -239,6 +261,7 @@ class PostTradeValidationEngine:
                 "avg_slippage":   round(float(df["avg_slippage_points"].mean()), 3),
             },
             "spread_friction_impact":    spread_matrix,
+            "style_expectancy":          style_matrix,
             "regime_expectancy":         regime_matrix,
             "session_latency_profiles":  session_matrix,
             "allocator_profile_efficiency": allocator_matrix,
