@@ -10,15 +10,31 @@ Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 
 ```
 MT5 BTCUSD M1 bars
-  → FeatureEngine    (RSI, MACD, BB, HMA, HHLL, regime, session)
-  → EdgeEngine       (directional mask — the LLM cannot override)
+  → FeatureEngine    (facts: price action + RSI, MACD, BB, HMA, regime, session)
+  → Trading Styles   (scalper: pure price action | runner: trend rider)
+  → EdgeEngine       (arbitrates styles by LEARNED live expectancy — LLM cannot override)
   → ClaudeAllocator  (Anthropic / Groq / Ollama / local fallback)
   → RiskEngine       (final authority — lot size, tier, daily halt)
   → Stealth Execution (virtual SL/TP in SQLite; broker gets only a wide emergency SL)
-  → TradeMemory      (every trade logged permanently)
+  → TradeMemory      (every trade logged permanently, per-style stats)
   → EQD Telemetry    (execution quality degrades aggression)
-  → Post-Trade Audit (closed-trades ledger → toxic-state blocklist, kill hours)
+  → Post-Trade Audit (closed-trades ledger → toxic states, kill hours, style expectancy)
 ```
+
+**Two trading styles** (`trading_styles.py`):
+
+| | SCALPER | TREND RUNNER |
+|---|---|---|
+| Signal inputs | **Raw price action only** — consecutive directional closes, range-expansion bursts, liquidity sweep-reclaims. Zero lagging indicators. | Confirmed TREND regime + HMA/structure agreement + momentum confirmation (lag acceptable — it rides, it doesn't react) |
+| Sessions | Any | LONDON / NY_OVERLAP / NY only |
+| Stop (ATR) | 0.5–0.9 (tight) | 1.2–2.0 (wide) |
+| Target (ATR) | 0.7–1.4 (quick ~1.5R) | 3.0–4.5 (let winners run) |
+| Cadence | Frequent | Few, high conviction |
+
+Both styles evaluate every bar; the EdgeEngine picks the winner weighted by
+each style's **live profit factor** (neutral until a style has 10 closed
+trades, then 0.6×–1.4×) — Gyna learns which style is earning and shifts
+weight automatically. The chosen style's risk envelope bounds Claude's SL/TP.
 
 **Key properties:**
 - Claude is the *allocator*, not the signal — EdgeEngine controls direction

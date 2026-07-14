@@ -68,3 +68,21 @@ def test_daily_stats_updated_on_close(mem):
     _open_trade(mem, ticket=444)
     mem.close_trade_by_ticket(444, 60100.0, 100.0, 12.5, "win")
     assert mem.get_daily_pnl() == 12.5
+
+
+def test_per_style_stats_feed_learned_arbitration(mem):
+    ticket = 500
+    for style, pnl in (("scalper", 10.0), ("scalper", -4.0),
+                       ("runner", 30.0), ("runner", 25.0), ("runner", -10.0)):
+        ticket += 1
+        mem.log_trade({"symbol": "BTCUSD", "direction": "BUY",
+                       "entry_price": 60000.0, "volume": 0.01,
+                       "mt5_ticket": ticket, "style": style,
+                       "outcome": "open"})
+        mem.close_trade_by_ticket(ticket, 60000.0 + pnl, pnl, pnl,
+                                  "win" if pnl > 0 else "loss")
+    stats = mem.get_style_stats()
+    assert stats["scalper"]["total_trades"] == 2
+    assert stats["runner"]["total_trades"] == 3
+    assert stats["runner"]["profit_factor"] == pytest.approx(5.5)
+    assert stats["scalper"]["profit_factor"] == pytest.approx(2.5)
