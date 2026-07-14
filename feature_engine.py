@@ -74,6 +74,63 @@ def _compute_hma(close: pd.Series, period: int = 20) -> pd.Series:
     return _wma(2 * _wma(close, half) - _wma(close, period), sqrp)
 
 
+# ── Raw price action (ZERO lagging indicators — scalper style fuel) ────────
+def _price_action_facts(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Pure price-action facts from CLOSED bars only. No moving averages, no
+    oscillators — just what price did: consecutive directional closes, range
+    expansion, where the last bar closed in its range, and liquidity sweeps
+    (wick beyond a recent extreme that closed back inside).
+    avg_range_14 is a plain mean of raw bar ranges, used only to NORMALIZE —
+    it is never a signal by itself.
+    """
+    closed = df.iloc[:-1]                      # exclude the forming bar
+    last   = closed.iloc[-1]
+    ranges = (closed["high"] - closed["low"])
+    avg_range = float(ranges.tail(14).mean()) or 1e-10
+
+    # Consecutive same-direction closes ending at the last closed bar (signed)
+    deltas = closed["close"].diff().dropna().tail(10).tolist()
+    consec = 0
+    for v in reversed(deltas):
+        if v > 0:
+            if consec < 0:
+                break
+            consec += 1
+        elif v < 0:
+            if consec > 0:
+                break
+            consec -= 1
+        else:
+            break
+
+    # Range expansion over the last 3 bars vs normal
+    burst_ratio = float(ranges.tail(3).sum() / (3 * avg_range))
+
+    # Where did the last bar close within its own range? (1.0 = at the high)
+    bar_range  = float(last["high"] - last["low"])
+    close_pos  = (float(last["close"] - last["low"]) / bar_range
+                  if bar_range > 0 else 0.5)
+
+    # Liquidity sweep + reclaim of the prior 10-bar extreme
+    prior      = closed.iloc[-11:-1]
+    swept_low  = bool(len(prior) == 10
+                      and float(last["low"]) < float(prior["low"].min()) - 0.25 * avg_range
+                      and float(last["close"]) > float(prior["low"].min()))
+    swept_high = bool(len(prior) == 10
+                      and float(last["high"]) > float(prior["high"].max()) + 0.25 * avg_range
+                      and float(last["close"]) < float(prior["high"].max()))
+
+    return {
+        "avg_range_14":      round(avg_range, 2),
+        "consec_dir_closes": int(consec),
+        "burst_range_ratio": round(burst_ratio, 3),
+        "last_close_pos":    round(close_pos, 3),
+        "swept_low":         swept_low,
+        "swept_high":        swept_high,
+    }
+
+
 # ── Market structure (half/half HHLL — no repainting pivots) ──────────────
 def _market_structure(df: pd.DataFrame,
                       lookback: int = 30) -> Tuple[str, float, int, int]:
@@ -335,6 +392,9 @@ class FeatureEngine:
             "volume_z":           round(float(vol_z.iloc[idx_0]), 3),
             "session":            _determine_session(current_time),
         }
+
+        # Raw price action — the scalper style's only inputs (no lag)
+        snapshot.update(_price_action_facts(df))
 
         snapshot["snapshot_hash"]    = _integrity_hash(snapshot)
         snapshot["state_signature"]  = _state_signature(snapshot)

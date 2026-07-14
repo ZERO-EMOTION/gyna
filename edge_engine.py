@@ -1,30 +1,29 @@
 """
 Gyna — edge_engine.py
-Deterministic pre-filter layer. Computes permitted_direction and edge_quality_score
-BEFORE Claude sees anything. Claude cannot reverse or override the directional mask.
+Deterministic pre-filter layer. Runs BOTH trading styles against the
+snapshot, arbitrates between them using each style's LEARNED live
+expectancy, and outputs the directional mask Claude cannot override.
 
 Architecture contract:
-  Features = facts → EdgeEngine = directional gate → Claude = allocation only
-  RiskEngine = law
+  Features = facts → styles = candidate signals → EdgeEngine = arbiter
+  → Claude = allocation only → RiskEngine = law
 
-Signal logic:
-  - HMA + HHLL consensus for trend direction
-  - BB mean-reversion for range entries
-  - Regime fatigue factor (long regimes lose edge)
-  - Performance memory injection (consecutive losses, EQD)
-
-Output feeds directly into claude_allocator.py as masked_snapshot.
+Styles (see trading_styles.py):
+  scalper — raw price action only, tight stops, quick targets, any regime
+  runner  — confirmed TREND rider, wide stops, 3R+ targets, liquid sessions
 
 Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 from __future__ import annotations
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from trading_styles import evaluate_scalper, evaluate_runner, style_weight
 
 
 class EdgeEngine:
     """
-    Deterministic edge evaluation. No randomness, no ML, no API calls.
-    Pure rule-based directional mask + orthogonal quality scoring.
+    Deterministic edge evaluation. No randomness, no API calls.
+    Style signals + learned weighting + global quality modifiers + vetoes.
     """
 
     def __init__(self, fatigue_threshold_bars: int = 48):
@@ -32,60 +31,35 @@ class EdgeEngine:
 
     def process_state(self,
                       feature_snapshot: Dict[str, Any],
-                      performance_memory: Dict[str, Any]) -> Dict[str, Any]:
+                      performance_memory: Dict[str, Any],
+                      style_stats: Optional[Dict[str, Any]] = None
+                      ) -> Dict[str, Any]:
         """
-        Applies directional mask and quality scoring to feature snapshot.
-
         Returns enriched snapshot with:
-          permitted_direction:   1=BUY, -1=SELL, 0=FLAT (Claude cannot change this)
+          permitted_direction:   1=BUY, -1=SELL, 0=FLAT (Claude cannot change)
           edge_quality_score:    0.0-1.0 (caps Claude's aggression_multiplier)
-          regime_fatigue_factor: 0.0-1.0 (reduces aggression in tired regimes)
-          trade_memory:          performance context for Claude's reasoning
+          style:                 which style produced the signal
+          allowed_sl/tp_atr_range: overridden with the STYLE's envelope
+          regime_fatigue_factor, trade_memory: context for Claude
         """
         snap = feature_snapshot.copy()
-        regime         = snap.get("regime", "RANGE")
-        hma_trend      = snap.get("hma_trend", "NEUTRAL")
-        hhll_bias      = snap.get("hhll_bias", "NEUTRAL")
-        struct_str     = float(snap.get("structure_strength", 0.0))
-        bb_pos         = float(snap.get("bb_position", 0.5))
-        bb_width_z     = float(snap.get("bb_width_z", 0.0))
-        atr_pct        = float(snap.get("atr_percentile", 50.0)) / 100.0
-        session        = snap.get("session", "ASIA")
-        vol_z          = float(snap.get("volume_z", 0.0))
-        regime_dur     = int(snap.get("regime_duration", 1))
-        macd_hist_z    = float(snap.get("macd_hist_z", 0.0))
-        rsi_dist_50    = float(snap.get("rsi_dist_50", 0.0))
+        session     = snap.get("session", "ASIA")
+        vol_z       = float(snap.get("volume_z", 0.0))
+        atr_pct     = float(snap.get("atr_percentile", 50.0)) / 100.0
+        regime_dur  = int(snap.get("regime_duration", 1))
 
-        # ── Directional mask ───────────────────────────────────────────────
-        permitted_direction = 0
+        # ── Candidate signals from both styles ─────────────────────────────
+        candidates = [c for c in (evaluate_scalper(snap), evaluate_runner(snap))
+                      if c is not None]
 
-        if regime in ("TREND", "VOLATILE"):
-            # Trend gate: HMA + HHLL must agree, structure must be clear
-            if (hma_trend == "BULLISH" and hhll_bias == "BULLISH"
-                    and struct_str >= 0.5):
-                permitted_direction = 1
-            elif (hma_trend == "BEARISH" and hhll_bias == "BEARISH"
-                    and struct_str >= 0.5):
-                permitted_direction = -1
+        # ── Learned arbitration: quality × live-expectancy weight ──────────
+        chosen = None
+        if candidates:
+            for c in candidates:
+                c["weighted"] = c["quality"] * style_weight(style_stats, c["style"])
+            chosen = max(candidates, key=lambda c: c["weighted"])
 
-        elif regime == "RANGE":
-            # Mean-reversion gate: BB squeeze + price at extremes
-            if bb_width_z < -0.5:              # contracted bands (squeeze)
-                if bb_pos <= 0.15:             # near lower band → long
-                    permitted_direction = 1
-                elif bb_pos >= 0.85:           # near upper band → short
-                    permitted_direction = -1
-            # Soft trend confirmation inside range (MACD + RSI agreement)
-            elif macd_hist_z > 0.5 and rsi_dist_50 > 10:
-                if hma_trend == "BULLISH":
-                    permitted_direction = 1
-            elif macd_hist_z < -0.5 and rsi_dist_50 < -10:
-                if hma_trend == "BEARISH":
-                    permitted_direction = -1
-
-        # VOLATILE with no trend agreement → FLAT (too dangerous)
-        if regime == "VOLATILE" and permitted_direction == 0:
-            pass  # stays 0
+        permitted_direction = chosen["direction"] if chosen else 0
 
         # ── Regime fatigue ─────────────────────────────────────────────────
         if regime_dur > self.fatigue_threshold:
@@ -94,38 +68,25 @@ class EdgeEngine:
         else:
             fatigue = 0.0
 
-        # ── Orthogonal quality score (caps Claude's aggression) ────────────
+        # ── Quality: style base + orthogonal global modifiers ──────────────
         score = 0.0
-
-        # Session liquidity (LONDON/NY_OVERLAP/NY = high quality)
-        if session in ("LONDON", "NY_OVERLAP", "NY"):
-            score += 0.20
-        elif session == "ASIA":
-            score += 0.10   # BTCUSD trades Asia but lower quality
-
-        # Volume expansion
-        if vol_z > 1.5:
-            score += 0.20
-        elif vol_z > 0.5:
-            score += 0.10
-
-        # ATR in sweet spot (not too low = fake breakout, not too high = chaos)
-        if 0.25 <= atr_pct <= 0.75:
-            score += 0.15
-
-        # Structure strength
-        score += struct_str * 0.20
-
-        # Momentum alignment (MACD z + RSI direction match permitted_direction)
-        if permitted_direction == 1 and macd_hist_z > 0 and rsi_dist_50 > 0:
-            score += 0.15
-        elif permitted_direction == -1 and macd_hist_z < 0 and rsi_dist_50 < 0:
-            score += 0.15
-        elif permitted_direction == 0:
-            score = 0.0
-
-        # Fatigue penalty
-        score = max(0.0, score * (1.0 - fatigue * 0.5))
+        if chosen:
+            score = chosen["quality"]
+            # Session liquidity
+            if session in ("LONDON", "NY_OVERLAP", "NY"):
+                score += 0.10
+            elif session == "ASIA":
+                score += 0.02
+            # Volume expansion
+            if vol_z > 1.5:
+                score += 0.10
+            elif vol_z > 0.5:
+                score += 0.05
+            # ATR sweet spot (not dead, not chaos)
+            if 0.25 <= atr_pct <= 0.75:
+                score += 0.05
+            # Fatigue penalty
+            score = max(0.0, score * (1.0 - fatigue * 0.5))
         score = round(min(1.0, score), 3)
 
         # ── Performance memory ─────────────────────────────────────────────
@@ -140,13 +101,21 @@ class EdgeEngine:
                                                 "eqd_coefficient", 0.0)), 3),
         }
 
-        # If consecutive losses ≥ 3 → force FLAT regardless of signal
+        # ── Global veto: 3 consecutive losses → FLAT no matter what ────────
         if trade_memory["consecutive_losses"] >= 3:
             permitted_direction = 0
             score = 0.0
+            chosen = None
 
         snap["permitted_direction"]   = permitted_direction
         snap["edge_quality_score"]    = score
         snap["regime_fatigue_factor"] = round(fatigue, 3)
         snap["trade_memory"]          = trade_memory
+        snap["style"]                 = chosen["style"] if chosen else None
+        snap["style_setup"]           = chosen["setup"] if chosen else None
+        if chosen:
+            # The style's risk envelope replaces the regime default —
+            # Claude's SL/TP targets are validated against THIS range.
+            snap["allowed_sl_atr_range"] = chosen["sl_range"]
+            snap["allowed_tp_atr_range"] = chosen["tp_range"]
         return snap
