@@ -42,9 +42,12 @@ from risk_engine import RiskEngine
 from execution_telemetry import ExecutionTelemetry
 from state_manager import StateManager
 from post_trade_analytics import (
-    PostTradeValidationEngine, compute_adaptive_stealth_decay
+    PostTradeValidationEngine, compute_adaptive_stealth_decay,
+    empirical_kill_hours,
 )
 from memory.trade_log import TradeMemory
+from reflection_engine import ReflectionEngine
+from telegram_notifier import TelegramNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,6 +102,8 @@ class GynaSystemOrchestrator:
         self.edge        = EdgeEngine(fatigue_threshold_bars=48)
         self.allocator   = ClaudeAllocator()
         self.risk        = RiskEngine()
+        self.reflection  = ReflectionEngine(self.memory, self.allocator)
+        self.notifier    = TelegramNotifier()
 
         # ── MT5 bridge (lazy — initialized in rehydration) ─────────────────
         self._mt5_ready  = False
@@ -125,6 +130,11 @@ class GynaSystemOrchestrator:
         # ── Feed staleness tracking (clock-skew immune) ─────────────────────
         self._last_tick_msc:    int   = 0
         self._last_tick_change: float = time.monotonic()
+
+        # ── Self-learning runtime state ─────────────────────────────────────
+        self.dynamic_kill_hours: set = set()   # empirically learned, refreshed daily
+        self._learning_refresh_date: str = ""
+        self._breaker_notified_date: str = ""
 
     # ── Terminal watchdog ──────────────────────────────────────────────────
 
@@ -267,6 +277,35 @@ class GynaSystemOrchestrator:
             if self.daily_loss_pct >= MAX_DAILY_LOSS:
                 log.warning(f"[DAYANCHOR] Daily loss {self.daily_loss_pct:.2%} >= "
                             f"{MAX_DAILY_LOSS:.2%} — breaker active")
+                if self._breaker_notified_date != today_str:
+                    self._breaker_notified_date = today_str
+                    self.notifier.send(
+                        f"GYNA HALTED for the day: loss "
+                        f"{self.daily_loss_pct:.2%} >= {MAX_DAILY_LOSS:.2%} "
+                        f"breaker. Resumes at next UTC day.")
+
+    # ── Learned state (refreshed at boot + daily) ──────────────────────────
+
+    def _refresh_learning_state(self) -> None:
+        """
+        Re-derive the toxic-state blocklist and empirical kill hours from
+        the closed-trades ledger. Called at boot and once per UTC day, so
+        yesterday's lessons apply today without a restart.
+        """
+        from datetime import datetime, timezone
+        try:
+            report = self.analytics.generate_report(days=30)
+            if report.get("status") == "PROFILED":
+                self.toxic_hashes = report.get("toxic_state_signatures", [])
+                self.dynamic_kill_hours = set(
+                    empirical_kill_hours(report, min_trades=10, max_hours=4))
+                log.info(f"[LEARN] Toxic blocklist: {len(self.toxic_hashes)} "
+                         f"signatures | Empirical kill hours: "
+                         f"{sorted(self.dynamic_kill_hours) or 'none'}")
+        except Exception as e:
+            log.warning(f"[LEARN] Refresh skipped: {e}")
+        self._learning_refresh_date = (
+            datetime.now(timezone.utc).date().isoformat())
 
     # ── Position cache ─────────────────────────────────────────────────────
 
@@ -343,14 +382,8 @@ class GynaSystemOrchestrator:
         self.telemetry.slippage_pts = hist.get("slippage", [])
         self.current_eqd            = hist.get("avg_eqd", 0.0)
 
-        # Load toxic state-signature blocklist
-        try:
-            report = self.analytics.generate_report(days=30)
-            if report.get("status") == "PROFILED":
-                self.toxic_hashes = report.get("toxic_state_signatures", [])
-                log.info(f"[BOOT] Toxic blocklist: {len(self.toxic_hashes)} signatures")
-        except Exception as e:
-            log.warning(f"[BOOT] Analytics skip: {e}")
+        # Load learned state (toxic blocklist + empirical kill hours)
+        self._refresh_learning_state()
 
         # Position reconciliation
         terminal_pos = {
@@ -503,6 +536,11 @@ class GynaSystemOrchestrator:
                     )
                     log.info(f"[STEALTH] {ticket} closed {'LOSS' if is_loss else 'WIN'} "
                              f"pnl=${realized_usd:+.2f}")
+                    self.notifier.send(
+                        f"Gyna closed #{ticket}: "
+                        f"{'LOSS' if is_loss else 'WIN'} ${realized_usd:+.2f} "
+                        f"@ {exit_price:.2f} | streak losses: "
+                        f"{self.consecutive_losses}")
                 else:
                     err = getattr(result, "retcode", "TIMEOUT")
                     log.error(f"[STEALTH] Close failed on {ticket}: {err} — releasing lock")
@@ -523,10 +561,24 @@ class GynaSystemOrchestrator:
             log.warning(f"[BAR] BLOCKED: cooldown {now - self.last_entry_ts:.0f}s / {MIN_COOLDOWN_S}s")
             return
 
-        # ── Kill hours ─────────────────────────────────────────────────────
+        # ── Daily learning refresh + weekly self-reflection ────────────────
         from datetime import datetime, timezone
-        if datetime.now(timezone.utc).hour in KILL_HOURS_UTC:
-            log.info("[KILL_HOUR] Skipping allocation")
+        now_utc = datetime.now(timezone.utc)
+        if now_utc.date().isoformat() != self._learning_refresh_date:
+            self._refresh_learning_state()
+        reflection = self.reflection.maybe_run(now_utc)
+        if reflection:
+            self.notifier.send(
+                f"Gyna weekly reflection ({reflection['n_trades']} trades, "
+                f"WR {reflection['win_rate']:.0%}):\n"
+                f"{reflection['content'][:600]}")
+
+        # ── Kill hours (configured + empirically learned) ──────────────────
+        if now_utc.hour in KILL_HOURS_UTC:
+            log.info("[KILL_HOUR] Skipping allocation (configured)")
+            return
+        if now_utc.hour in self.dynamic_kill_hours:
+            log.info("[KILL_HOUR] Skipping allocation (learned from history)")
             return
 
         # ── Market data ────────────────────────────────────────────────────
@@ -602,6 +654,7 @@ class GynaSystemOrchestrator:
             allocation = self.allocator.allocate_cycle(
                 masked,
                 recent_losses=recent_losses,
+                reflections=self.reflection.recent_lessons(),
             )
             allocation["aggression_multiplier"] = round(
                 allocation["aggression_multiplier"] * toxicity_scalar, 3)
@@ -788,6 +841,12 @@ class GynaSystemOrchestrator:
             f"Tier={auth.get('risk_tier')} risk={auth.get('risk_pct',0)*100:.2f}% | "
             f"EQD={self.current_eqd:.3f} slip={slippage:+.1f}pts"
         )
+        self.notifier.send(
+            f"Gyna opened #{ticket}: {'BUY' if direction == 1 else 'SELL'} "
+            f"{params['volume']} lot @ {fill_price:.2f} | "
+            f"{snap.get('regime')}/{snap.get('session')} | "
+            f"Tier {auth.get('risk_tier')} "
+            f"risk {auth.get('risk_pct', 0) * 100:.2f}%")
 
     # ── Filling mode ───────────────────────────────────────────────────────
 
@@ -808,6 +867,8 @@ class GynaSystemOrchestrator:
     def run(self) -> None:
         self.system_rehydration_barrier()
         log.info("[IGNITION] Gyna live — 50ms monotonic loop active")
+        self.notifier.send(f"Gyna v{VERSION} online — {SYMBOL} M1, "
+                           f"autonomous loop running.")
 
         cadence       = LOOP_CADENCE_S
         next_frame    = time.perf_counter()
@@ -871,6 +932,8 @@ class GynaSystemOrchestrator:
         finally:
             self.state_db.flush_telemetry_buffer()
             mt5.shutdown()
+            self.notifier.send("Gyna offline. Open positions remain "
+                               "protected by the emergency broker SL.")
             log.info("[SHUTDOWN] Gyna offline. Telemetry synchronized.")
 
 

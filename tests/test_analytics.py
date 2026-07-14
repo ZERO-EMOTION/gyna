@@ -65,3 +65,25 @@ def test_empty_ledger_reports_insufficient_data(tmp_path):
     StateManager(path)
     engine = PostTradeValidationEngine(path)
     assert engine.generate_report()["status"] == "INSUFFICIENT_DATA"
+
+
+def test_empirical_kill_hours_guards():
+    from post_trade_analytics import empirical_kill_hours
+    report = {"hourly_pnl_distribution": {
+        3:  {"sum": -500.0, "count": 15, "mean": -33.3},   # qualifies
+        7:  {"sum": -900.0, "count": 12, "mean": -75.0},   # qualifies (worst)
+        9:  {"sum": -50.0,  "count": 4,  "mean": -12.5},   # too few trades
+        14: {"sum": +300.0, "count": 30, "mean": 10.0},    # profitable
+        21: {"sum": -100.0, "count": 11, "mean": -9.1},    # qualifies
+        22: {"sum": -80.0,  "count": 10, "mean": -8.0},    # qualifies
+        23: {"sum": -60.0,  "count": 10, "mean": -6.0},    # over max_hours cap
+    }}
+    hours = empirical_kill_hours(report, min_trades=10, max_hours=4)
+    assert hours == [7, 3, 21, 22]        # worst-first, capped at 4
+    assert 9 not in hours and 14 not in hours and 23 not in hours
+
+
+def test_empirical_kill_hours_empty_report():
+    from post_trade_analytics import empirical_kill_hours
+    assert empirical_kill_hours({}) == []
+    assert empirical_kill_hours({"status": "INSUFFICIENT_DATA"}) == []

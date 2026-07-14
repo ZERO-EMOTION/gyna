@@ -313,6 +313,27 @@ class PostTradeValidationEngine:
         print(f"{sep}\n")
 
 
+# ── Empirical kill hours ───────────────────────────────────────────────────
+
+def empirical_kill_hours(report: Dict[str, Any],
+                         min_trades: int = 10,
+                         max_hours: int = 4) -> List[int]:
+    """
+    Select UTC hours the system should stop trading, from its own history.
+
+    Guards against learning noise:
+      - an hour needs >= min_trades closed trades before it can qualify
+      - only net-NEGATIVE hours qualify
+      - at most max_hours are ever blocked (never kill the whole day)
+    Returns hours sorted worst-first.
+    """
+    hours = report.get("hourly_pnl_distribution", {}) or {}
+    losers = [(int(h), v) for h, v in hours.items()
+              if v.get("count", 0) >= min_trades and v.get("sum", 0.0) < 0]
+    losers.sort(key=lambda x: x[1]["sum"])
+    return [h for h, _ in losers[:max_hours]]
+
+
 # ── Adaptive exit decay (added to RiskEngine interface) ───────────────────
 
 def compute_adaptive_stealth_decay(open_duration_bars: int,
