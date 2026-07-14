@@ -87,7 +87,8 @@ class GynAllocator:
 
     def allocate_cycle(self,
                        masked_snapshot: Dict[str, Any],
-                       recent_losses:   Optional[list] = None) -> Dict[str, Any]:
+                       recent_losses:   Optional[list] = None,
+                       reflections:     Optional[list] = None) -> Dict[str, Any]:
         """Main allocation call. Returns allocation dict."""
 
         # Fast-path: deterministic flat
@@ -99,6 +100,11 @@ class GynAllocator:
         payload = masked_snapshot.copy()
         if recent_losses:
             payload["recent_losses"] = recent_losses[-5:]  # last 5 only
+        if reflections:
+            # Gyna's own weekly self-review — lessons from its trade history
+            payload["weekly_self_reflections"] = [
+                str(r)[:800] for r in reflections[-2:]
+            ]
 
         # Try provider chain
         result = None
@@ -250,6 +256,63 @@ class GynAllocator:
         except Exception as e:
             log.warning(f"Parse/verify failed ({source}): {e}")
             return None
+
+    # ── Generic text completion (reflection engine etc.) ──────────────────
+
+    def complete(self, system: str, user: str,
+                 max_tokens: int = 800) -> Optional[str]:
+        """
+        Free-form text completion through the same provider chain used for
+        allocation (chosen provider first, then groq → anthropic). Returns
+        None when every provider fails — callers must handle that.
+        """
+        order = [self.provider] + [p for p in ("groq", "anthropic")
+                                   if p != self.provider]
+        for p in order:
+            try:
+                if p == "anthropic" and self.claude_key:
+                    from anthropic import Anthropic
+                    client = Anthropic(api_key=self.claude_key)
+                    resp = client.messages.create(
+                        model=self.claude_model, max_tokens=max_tokens,
+                        system=system,
+                        messages=[{"role": "user", "content": user}])
+                    return resp.content[0].text.strip()
+                if p == "groq" and self.groq_key:
+                    import urllib.request
+                    body = json.dumps({
+                        "model": self.groq_model,
+                        "messages": [{"role": "system", "content": system},
+                                     {"role": "user",   "content": user}],
+                        "max_tokens": max_tokens,
+                    }).encode()
+                    req = urllib.request.Request(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        data=body,
+                        headers={"Content-Type": "application/json",
+                                 "Authorization": f"Bearer {self.groq_key}"},
+                        method="POST")
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        data = json.loads(resp.read())
+                    return data["choices"][0]["message"]["content"].strip()
+                if p == "ollama":
+                    import urllib.request
+                    body = json.dumps({
+                        "model": self.ollama_model,
+                        "messages": [{"role": "system", "content": system},
+                                     {"role": "user",   "content": user}],
+                        "stream": False,
+                    }).encode()
+                    req = urllib.request.Request(
+                        f"{self.ollama_url}/api/chat", data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST")
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        data = json.loads(resp.read())
+                    return data.get("message", {}).get("content", "").strip() or None
+            except Exception as e:
+                log.warning(f"complete() via {p} failed: {e}")
+        return None
 
     # ── Local autonomous fallback ──────────────────────────────────────────
 
