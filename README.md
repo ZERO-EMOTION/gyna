@@ -27,7 +27,20 @@ MT5 BTCUSD M1 bars
 - Crash-proof loop: a failing frame is logged and retried, never kills the process while positions are open
 - Risk tier auto-promotes based on real win rate + profit factor
 - Toxic-state blocklist matches on a **quantized state signature** (recurring across bars), not the per-bar snapshot hash
-- 40/40 unit tests passing
+- 48/48 unit tests passing
+
+**How it learns (the loops that make it Gyna):**
+1. **Recent losses** are injected into every allocation prompt
+2. **Risk tiers** are earned from real WR/PF, never configured
+3. **Toxic-state blocklist** — recurring losing market states get a 50% aggression penalty, refreshed daily in-session
+4. **EQD** — degrading fill quality automatically shrinks size
+5. **Empirical kill hours** — hours with ≥10 trades and net-negative PnL are blocked automatically (max 4, so noise can never kill the whole day)
+6. **Weekly self-reflection** — every Sunday 00:00 UTC Gyna reviews its week with the LLM, stores the lesson permanently, and feeds its two most recent lessons into every future allocation prompt
+
+**How it runs itself:**
+- `START GYNA.bat` — 1-click launch with auto-restart 10s after any crash
+- `STOP GYNA.bat` — 1-click kill
+- Telegram notifications (optional): boot, every open/close with PnL, daily-loss halt, weekly reflection, shutdown
 
 ---
 
