@@ -17,6 +17,7 @@ Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 from __future__ import annotations
 from typing import Any, Dict, Optional
 
+from config import SAFETY_FILTERS_ENABLED
 from trading_styles import evaluate_scalper, evaluate_runner, style_weight
 
 
@@ -26,8 +27,11 @@ class EdgeEngine:
     Style signals + learned weighting + global quality modifiers + vetoes.
     """
 
-    def __init__(self, fatigue_threshold_bars: int = 48):
+    def __init__(self, fatigue_threshold_bars: int = 48,
+                 safety_filters: bool = None):
         self.fatigue_threshold = fatigue_threshold_bars
+        self.safety = (SAFETY_FILTERS_ENABLED if safety_filters is None
+                       else safety_filters)
 
     def process_state(self,
                       feature_snapshot: Dict[str, Any],
@@ -101,8 +105,8 @@ class EdgeEngine:
                                                 "eqd_coefficient", 0.0)), 3),
         }
 
-        # ── Global veto: 3 consecutive losses → FLAT no matter what ────────
-        if trade_memory["consecutive_losses"] >= 3:
+        # ── Global veto: 3 consecutive losses → FLAT (safety filter) ───────
+        if self.safety and trade_memory["consecutive_losses"] >= 3:
             permitted_direction = 0
             score = 0.0
             chosen = None

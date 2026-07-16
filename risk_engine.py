@@ -22,15 +22,24 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from config import RISK_TIERS, MAX_RISK_PER_TRADE, MAX_DAILY_LOSS
+from config import (RISK_TIERS, MAX_RISK_PER_TRADE, MAX_DAILY_LOSS,
+                    SAFETY_FILTERS_ENABLED)
 
 log = logging.getLogger("Gyna.RiskEngine")
 
 
 class RiskEngine:
 
-    def __init__(self):
+    def __init__(self, safety_filters: bool = None):
         self.risk_tiers = RISK_TIERS
+        # Master toggle: when False, every protective GATE below is skipped.
+        # Sizing clamps (MAX_RISK_PER_TRADE, broker lot limits) always apply.
+        self.safety = (SAFETY_FILTERS_ENABLED if safety_filters is None
+                       else safety_filters)
+        if not self.safety:
+            log.warning("!!! SAFETY FILTERS OFF — all protective gates "
+                        "disabled (drawdown breaker, friction, kill hours, "
+                        "loss-halving, EQD, margin stress) !!!")
 
     # ── Risk tier ──────────────────────────────────────────────────────────
 
@@ -65,7 +74,7 @@ class RiskEngine:
         """
         # ── Gate 1: Daily drawdown breaker ────────────────────────────────
         daily_loss = float(account_state.get("daily_realized_loss_pct", 0.0))
-        if daily_loss >= MAX_DAILY_LOSS:
+        if self.safety and daily_loss >= MAX_DAILY_LOSS:
             log.warning(f"🛑 Daily loss breaker: {daily_loss:.2%} ≥ {MAX_DAILY_LOSS:.2%}")
             return {"status": "REJECTED_DRAWDOWN_BREAKER_ACTIVE",
                     "action": "HALT"}
@@ -82,7 +91,7 @@ class RiskEngine:
         tp_atr      = float(allocation["tp_atr_target"])
 
         friction_pct = (spread_pts * tick_size) / (atr * tp_atr + 1e-10)
-        if friction_pct > 0.15:
+        if self.safety and friction_pct > 0.15:
             log.warning(f"Friction {friction_pct:.1%} > 15% — skip")
             return {"status": "REJECTED_COST_FRICTION_EXCEEDED",
                     "action": "STAY_FLAT"}
@@ -91,7 +100,7 @@ class RiskEngine:
         from datetime import datetime, timezone
         from config import KILL_HOURS_UTC
         hour = datetime.now(timezone.utc).hour
-        if hour in KILL_HOURS_UTC:
+        if self.safety and hour in KILL_HOURS_UTC:
             return {"status": "REJECTED_KILL_HOUR",
                     "action": "STAY_FLAT"}
 
@@ -107,9 +116,10 @@ class RiskEngine:
 
         # Scale: base × aggression^1.5, halved per consecutive loss, EQD penalty
         scaled_risk = base_risk * (aggr ** 1.5)
-        if consecutive_l > 0:
-            scaled_risk *= (0.5 ** consecutive_l)
-        scaled_risk *= (1.0 - eqd)
+        if self.safety:
+            if consecutive_l > 0:
+                scaled_risk *= (0.5 ** consecutive_l)
+            scaled_risk *= (1.0 - eqd)
         scaled_risk = max(0.001, min(scaled_risk, MAX_RISK_PER_TRADE))
 
         balance      = float(account_state["balance"])
@@ -139,7 +149,7 @@ class RiskEngine:
         else:
             req_margin = (lots * contract_size * current_price) / leverage
 
-        if req_margin > free_margin * 0.70:
+        if self.safety and req_margin > free_margin * 0.70:
             log.warning(f"Margin stress: req={req_margin:.0f} > 70% free={free_margin:.0f}")
             return {"status": "REJECTED_MARGIN_STRESS",
                     "action": "STAY_FLAT"}

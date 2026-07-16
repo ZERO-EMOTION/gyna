@@ -60,16 +60,48 @@ weight automatically. The chosen style's risk envelope bounds Claude's SL/TP.
 
 ---
 
-## Quick Start
+## Quick Start — multi-asset instances (XAUUSD + BTCUSD)
+
+One shared codebase, one folder per symbol. Each instance folder holds only
+its `.env`, databases, and logs — **no code is ever copied**. Learning state
+(trade memory, tiers, toxic blocklist, kill hours, reflections) is fully
+isolated per symbol, because a gold lesson applied to BTC is noise.
 
 ```bash
 git clone https://github.com/janpauldelacruz/gyna
 cd gyna
 pip install -r requirements.txt
-cp .env.example .env
-# Fill in MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, ANTHROPIC_API_KEY
-python main.py
+
+# Configure each instance you want to run:
+copy instances\XAUUSD\.env.example instances\XAUUSD\.env   # then fill in
+copy instances\BTCUSD\.env.example instances\BTCUSD\.env   # then fill in
+
+"START GYNA.bat"           # starts every configured instance
+"START GYNA.bat" XAUUSD    # or just one
+"STOP GYNA.bat"            # stops all (or pass a symbol)
 ```
+
+Single-instance use still works: put a `.env` in the repo root and
+`python main.py`.
+
+Per-symbol market differences live in ONE place — `SYMBOL_PROFILES` in
+`config.py` (spread cap, cooldown, feed staleness, market hours). All
+signal/sizing logic is ATR-relative and asset-agnostic. The account-level
+5% daily breaker is computed from account equity and all deals, so both
+instances halt together no matter which one caused the loss.
+
+## Master Safety Toggle
+
+`SAFETY_FILTERS=off` in an instance's `.env` disables **all** protective
+filters at once: spread firewall, entry cooldown, kill hours (configured +
+learned), toxic-state penalty, 3-loss flatten + per-loss risk halving, EQD
+penalty, daily-loss breaker, cost-friction gate, and margin-stress gate.
+Boot logs and Telegram shout a warning when it's off.
+
+**Always on regardless of the toggle** (physics, not filters):
+`MAX_RISK_PER_TRADE` clamp, broker lot limits, `MAX_OPEN_POSITIONS`,
+the emergency broker SL, the terminal/feed watchdog, and market-closed
+hours. Default is `on`; `off` is for unfiltered testing only.
 
 ---
 
