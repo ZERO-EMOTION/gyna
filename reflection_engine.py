@@ -16,11 +16,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from config import REFLECTION_DAY, REFLECTION_HOUR
+from config import REFLECTION_DAY, REFLECTION_HOUR, SYMBOL
 
 log = logging.getLogger("Gyna.Reflection")
 
-REFLECTION_SYSTEM_PROMPT = """You are the weekly self-review module of Gyna, an autonomous BTCUSD M1 scalping system that learns from its own trade history.
+REFLECTION_SYSTEM_PROMPT = f"""You are the weekly self-review module of Gyna, an autonomous {SYMBOL} M1 trading system that learns from its own trade history.
 
 You will receive the week's closed trades and aggregate stats. Write a reflection that a risk-allocation engine can act on next week. Be specific and quantitative, never generic.
 

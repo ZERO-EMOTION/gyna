@@ -1,17 +1,34 @@
 @echo off
-rem PARALLAX — Gyna 1-click launcher with auto-restart.
-rem Double-click to start. The loop restarts Gyna 10s after any crash,
-rem so the learning trader keeps itself running unattended.
+rem PARALLAX — Gyna multi-instance launcher with auto-restart.
+rem   START GYNA.bat            -> starts every instance under instances\
+rem   START GYNA.bat XAUUSD     -> starts one instance
+rem One shared codebase; each instance runs in its OWN folder (its .env,
+rem databases, logs) — no code copying. Crash -> relaunch after 10s.
+
 if "%~1"=="run" goto run
-start "GYNA" cmd /c ""%~f0" run"
+
+if not "%~1"=="" (
+    call :launch %~1
+    exit /b
+)
+for /d %%I in ("%~dp0instances\*") do call :launch %%~nxI
+exit /b
+
+:launch
+if not exist "%~dp0instances\%~1\.env" (
+    echo [GYNA] Skipping %~1 — no .env in instances\%~1 ^(copy .env.example^)
+    exit /b
+)
+start "GYNA-%~1" cmd /c ""%~f0" run %~1"
 exit /b
 
 :run
-title GYNA
-cd /d "%~dp0"
+set SYM=%~2
+title GYNA-%SYM%
+cd /d "%~dp0instances\%SYM%"
 :loop
-python main.py
+python "%~dp0main.py"
 echo.
-echo [GYNA] Process exited — restarting in 10 seconds (close window to stop)...
+echo [GYNA-%SYM%] Process exited — restarting in 10 seconds (close window to stop)...
 timeout /t 10 /nobreak >nul
 goto loop

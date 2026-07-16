@@ -24,7 +24,11 @@ from typing import Any, Dict, Optional
 log = logging.getLogger("Gyna.Allocator")
 
 # ── System prompt (same for all providers) ────────────────────────────────
-SYSTEM_PROMPT = """You are the risk allocation engine of Gyna, an autonomous BTCUSD M1 trading system with TWO trading styles.
+from config import SYMBOL as _SYMBOL
+
+# NOTE: plain string + replace — an f-string would choke on the literal
+# braces of the JSON response template below.
+SYSTEM_PROMPT = """You are the risk allocation engine of Gyna, an autonomous __SYMBOL__ M1 trading system with TWO trading styles.
 
 YOUR ROLE IS ALLOCATION NOT DIRECTION.
 The signal layer has already computed permitted_direction and chosen the style. You cannot change either.
@@ -67,7 +71,7 @@ RESPOND ONLY with a single JSON object, no markdown, no preamble:
   "tp_atr_target": <float within allowed_tp_atr_range>,
   "allocation_rationale": "<one paragraph explaining regime, session, structure, sizing>"
 }
-"""
+""".replace("__SYMBOL__", _SYMBOL)
 
 
 class GynAllocator:

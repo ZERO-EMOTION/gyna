@@ -33,7 +33,7 @@ from config import (
     NAME, VERSION, SYMBOLS, CYCLE_MINUTES, KILL_HOURS_UTC,
     MAX_OPEN_POSITIONS, DB_PATH, STATE_DB_PATH, RECENT_LOSSES_N,
     RISK_TIERS, USE_BROKER_EMERGENCY_SL, EMERGENCY_SL_MULTIPLIER,
-    MAX_DAILY_LOSS,
+    MAX_DAILY_LOSS, PROFILE, SAFETY_FILTERS_ENABLED,
 )
 from feature_engine import FeatureEngine
 from edge_engine import EdgeEngine
@@ -59,16 +59,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("Gyna.Orchestrator")
 
-# ── Runtime constants ──────────────────────────────────────────────────────
+# ── Runtime constants (market-specific values come from SYMBOL_PROFILES) ──
 LOOP_CADENCE_S           = 0.050   # 50ms tick frame
 POSITION_CACHE_INTERVAL  = 0.250   # 250ms position poll throttle
 HEARTBEAT_INTERVAL       = 1.0     # 1Hz terminal watchdog
-MAX_FEED_STALENESS_S     = 60.0    # relaxed for BTCUSD
-MAX_SPREAD_POINTS        = 3000   # BTCUSD aggressive spread filter
-MIN_COOLDOWN_S           = 180   # 3 min cooldown — BTC: fewer trades, higher quality
+MAX_FEED_STALENESS_S     = float(PROFILE["feed_staleness_s"])
+MAX_SPREAD_POINTS        = int(PROFILE["max_spread_points"])
+MIN_COOLDOWN_S           = int(PROFILE["cooldown_s"])
 OPTIMISTIC_TTL_S         = 2.0     # max time for optimistic position to propagate
 BAR_REGISTRY_RETENTION_S = 86400  # 24hr bar registry pruning
-SYMBOL                   = SYMBOLS[0]   # BTCUSD
+SYMBOL                   = SYMBOLS[0]   # from the instance .env
 
 
 # ── Environment validation ────────────────────────────────────────────────
@@ -180,10 +180,15 @@ class GynaSystemOrchestrator:
         return True
 
     def _is_market_active(self) -> bool:
-        """BTCUSD trades 24/7. Weekends only block traditional FX."""
-        if "BTC" in SYMBOL or "ETH" in SYMBOL:
+        """Profile-driven: 24/7 assets always active; others respect
+        weekends and the daily maintenance window. NOT a safety filter —
+        a closed market is closed regardless of the master toggle."""
+        if PROFILE["always_open"]:
             return True
-        return time.gmtime().tm_wday not in (5, 6)
+        g = time.gmtime()
+        if g.tm_wday in (5, 6):
+            return False
+        return g.tm_hour not in PROFILE["closed_utc_hours"]
 
     # ── P3: Broker-authoritative realized PnL for a closed position ───────
 
@@ -537,7 +542,7 @@ class GynaSystemOrchestrator:
                     log.info(f"[STEALTH] {ticket} closed {'LOSS' if is_loss else 'WIN'} "
                              f"pnl=${realized_usd:+.2f}")
                     self.notifier.send(
-                        f"Gyna closed #{ticket}: "
+                        f"Gyna {SYMBOL} closed #{ticket}: "
                         f"{'LOSS' if is_loss else 'WIN'} ${realized_usd:+.2f} "
                         f"@ {exit_price:.2f} | streak losses: "
                         f"{self.consecutive_losses}")
@@ -557,8 +562,13 @@ class GynaSystemOrchestrator:
             log.warning("[BAR] BLOCKED: max positions")
             return
 
-        if now - self.last_entry_ts < MIN_COOLDOWN_S:
+        if SAFETY_FILTERS_ENABLED and now - self.last_entry_ts < MIN_COOLDOWN_S:
             log.warning(f"[BAR] BLOCKED: cooldown {now - self.last_entry_ts:.0f}s / {MIN_COOLDOWN_S}s")
+            return
+
+        # Market hours are physics, not a safety filter — always enforced
+        if not self._is_market_active():
+            log.info("[BAR] Market closed (weekend/maintenance) — skipping")
             return
 
         # ── Daily learning refresh + weekly self-reflection ────────────────
@@ -574,12 +584,13 @@ class GynaSystemOrchestrator:
                 f"{reflection['content'][:600]}")
 
         # ── Kill hours (configured + empirically learned) ──────────────────
-        if now_utc.hour in KILL_HOURS_UTC:
-            log.info("[KILL_HOUR] Skipping allocation (configured)")
-            return
-        if now_utc.hour in self.dynamic_kill_hours:
-            log.info("[KILL_HOUR] Skipping allocation (learned from history)")
-            return
+        if SAFETY_FILTERS_ENABLED:
+            if now_utc.hour in KILL_HOURS_UTC:
+                log.info("[KILL_HOUR] Skipping allocation (configured)")
+                return
+            if now_utc.hour in self.dynamic_kill_hours:
+                log.info("[KILL_HOUR] Skipping allocation (learned from history)")
+                return
 
         # ── Market data ────────────────────────────────────────────────────
         sym_info = mt5.symbol_info(SYMBOL)
@@ -590,7 +601,7 @@ class GynaSystemOrchestrator:
             return
 
         # ── Spread firewall ────────────────────────────────────────────────
-        if sym_info.spread > MAX_SPREAD_POINTS:
+        if SAFETY_FILTERS_ENABLED and sym_info.spread > MAX_SPREAD_POINTS:
             log.warning(f"[SPREAD] {sym_info.spread} > {MAX_SPREAD_POINTS} — abort")
             return
 
@@ -648,7 +659,7 @@ class GynaSystemOrchestrator:
 
         # ── Toxic state soft-block (quantized signature, recurs across bars) ─
         toxicity_scalar = 1.0
-        if snap.get("state_signature") in self.toxic_hashes:
+        if SAFETY_FILTERS_ENABLED and snap.get("state_signature") in self.toxic_hashes:
             log.warning("[TOXIC] State signature in blocklist — 50% aggression penalty")
             toxicity_scalar = 0.50
 
@@ -848,7 +859,7 @@ class GynaSystemOrchestrator:
             f"EQD={self.current_eqd:.3f} slip={slippage:+.1f}pts"
         )
         self.notifier.send(
-            f"Gyna opened #{ticket} [{style}]: "
+            f"Gyna {SYMBOL} opened #{ticket} [{style}]: "
             f"{'BUY' if direction == 1 else 'SELL'} "
             f"{params['volume']} lot @ {fill_price:.2f} | "
             f"{snap.get('regime')}/{snap.get('session')} | "
@@ -874,8 +885,15 @@ class GynaSystemOrchestrator:
     def run(self) -> None:
         self.system_rehydration_barrier()
         log.info("[IGNITION] Gyna live — 50ms monotonic loop active")
+        if not SAFETY_FILTERS_ENABLED:
+            log.warning("!!! MASTER SAFETY TOGGLE IS OFF — spread firewall, "
+                        "cooldown, kill hours, toxic penalty, loss-streak "
+                        "protection, EQD, daily breaker, friction and margin "
+                        "gates are ALL DISABLED !!!")
         self.notifier.send(f"Gyna v{VERSION} online — {SYMBOL} M1, "
-                           f"autonomous loop running.")
+                           f"autonomous loop running."
+                           + ("" if SAFETY_FILTERS_ENABLED else
+                              " WARNING: SAFETY FILTERS OFF."))
 
         cadence       = LOOP_CADENCE_S
         next_frame    = time.perf_counter()

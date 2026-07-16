@@ -4,9 +4,13 @@ Central configuration. NO external imports (no mt5 here — imported only in mt5
 Copyright © 2026 PARALLAX — JP × Claude. All rights reserved.
 """
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+# usecwd=True: the .env of the CURRENT WORKING DIRECTORY wins — this is what
+# lets each instance folder (instances/XAUUSD, instances/BTCUSD) carry its
+# own symbol/credentials while sharing one codebase. Falls back to the repo
+# root .env when run from the repo (tests, single-instance use).
+load_dotenv(find_dotenv(usecwd=True))
 
 # ── Identity ───────────────────────────────────────────────────────────────
 NAME    = "Gyna"
@@ -28,13 +32,47 @@ OLLAMA_URL        = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
 
 # ── Trading ────────────────────────────────────────────────────────────────
-SYMBOLS        = ["BTCUSD"]
+# SYMBOL comes from the instance's .env — each instance folder trades ONE
+# symbol with its own databases, logs, and learning state. No code copying.
+SYMBOL         = os.getenv("SYMBOL", "BTCUSD").upper()
+SYMBOLS        = [SYMBOL]
 TIMEFRAME_STR  = "M1"            # M1 scalping
 BARS           = 200
 CYCLE_MINUTES  = 1               # M1 scalping
 
+# Per-symbol market profiles — the ONLY place asset differences live.
+# ATR-relative logic (styles, envelopes, sizing) is asset-agnostic by design.
+SYMBOL_PROFILES = {
+    "BTCUSD": {
+        "max_spread_points": 3000,   # BTC raw spread is wide in points
+        "cooldown_s":        180,
+        "feed_staleness_s":  60,
+        "always_open":       True,   # 24/7 asset
+        "closed_utc_hours":  [],     # no daily maintenance break
+    },
+    "XAUUSD": {
+        "max_spread_points": 60,     # ~$0.60 — generous for ICM Raw gold
+        "cooldown_s":        180,
+        "feed_staleness_s":  30,
+        "always_open":       False,  # weekends closed
+        "closed_utc_hours":  [21],   # ICM daily maintenance window (approx)
+    },
+}
+PROFILE = SYMBOL_PROFILES.get(SYMBOL, SYMBOL_PROFILES["BTCUSD"])
+
 # Kill hours (UTC) — empirically proven worst hours across fleet
 KILL_HOURS_UTC = []
+
+# ── MASTER SAFETY TOGGLE ───────────────────────────────────────────────────
+# SAFETY_FILTERS=off in .env disables ALL protective filters at once:
+#   spread firewall, entry cooldown, kill hours (configured + learned),
+#   toxic-state penalty, 3-loss flatten + per-loss halving, EQD penalty,
+#   daily-loss breaker, cost-friction gate, margin-stress gate.
+# ALWAYS ON regardless: MAX_RISK_PER_TRADE clamp, broker lot limits,
+# MAX_OPEN_POSITIONS, emergency broker SL, feed/terminal watchdog,
+# market-closed hours. Default: on. Use off for unfiltered testing ONLY.
+SAFETY_FILTERS_ENABLED = (os.getenv("SAFETY_FILTERS", "on")
+                          .strip().lower() not in ("off", "0", "false", "no"))
 
 # ── Risk Tiers ─────────────────────────────────────────────────────────────
 # (min_trades, min_win_rate, min_profit_factor) → risk_pct
@@ -70,4 +108,6 @@ TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ASCII-only: emoji in print() crashes on cp1252 Windows consoles
-print(f"[OK] {NAME} v{VERSION} config loaded | Provider: {LLM_PROVIDER} | Model: {MODEL}")
+print(f"[OK] {NAME} v{VERSION} config loaded | Symbol: {SYMBOL} | "
+      f"Provider: {LLM_PROVIDER} | Model: {MODEL} | "
+      f"Safety filters: {'ON' if SAFETY_FILTERS_ENABLED else '!!! OFF !!!'}")
