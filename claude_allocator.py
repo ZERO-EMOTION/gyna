@@ -192,7 +192,9 @@ class GynAllocator:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            # 120s: covers a cold model load; allocations only run while
+            # FLAT, so a slow answer just delays one entry, never an exit
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read())
 
             raw = data.get("message", {}).get("content", "").strip()

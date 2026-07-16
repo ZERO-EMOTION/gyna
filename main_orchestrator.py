@@ -34,7 +34,19 @@ from config import (
     MAX_OPEN_POSITIONS, DB_PATH, STATE_DB_PATH, RECENT_LOSSES_N,
     RISK_TIERS, USE_BROKER_EMERGENCY_SL, EMERGENCY_SL_MULTIPLIER,
     MAX_DAILY_LOSS, PROFILE, SAFETY_FILTERS_ENABLED,
+    MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_TERMINAL_PATH, MT5_PORTABLE,
 )
+
+
+def _mt5_initialize() -> bool:
+    """ALWAYS log in with explicit credentials. A bare mt5.initialize()
+    attaches to whatever account the terminal last used — on a machine
+    where another EA trades a LIVE account, that is how demo bots end up
+    on live money. Never allowed here."""
+    kwargs = dict(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
+    if MT5_TERMINAL_PATH:
+        return mt5.initialize(MT5_TERMINAL_PATH, portable=MT5_PORTABLE, **kwargs)
+    return mt5.initialize(**kwargs)
 from feature_engine import FeatureEngine
 from edge_engine import EdgeEngine
 from claude_allocator import ClaudeAllocator
@@ -174,7 +186,7 @@ class GynaSystemOrchestrator:
     def _emergency_recovery(self) -> bool:
         mt5.shutdown()
         time.sleep(1.0)
-        if not mt5.initialize():
+        if not _mt5_initialize():
             log.critical(f"[WATCHDOG] Recovery failed: {mt5.last_error()}")
             return False
         if not mt5.symbol_select(SYMBOL, True):
@@ -371,8 +383,18 @@ class GynaSystemOrchestrator:
     def system_rehydration_barrier(self) -> None:
         log.info(f"[BOOT] Starting {NAME} v{VERSION}...")
 
-        if not mt5.initialize():
+        if not _mt5_initialize():
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
+        acct = mt5.account_info()
+        if acct is None or int(acct.login) != int(MT5_LOGIN):
+            mt5.shutdown()
+            raise RuntimeError(
+                f"[BOOT] Connected account {getattr(acct, 'login', None)} "
+                f"!= configured {MT5_LOGIN} — refusing to trade on the "
+                f"wrong account")
+        log.info(f"[BOOT] Account verified: {acct.login} ({acct.server}) "
+                 f"balance={acct.balance:.2f} "
+                 f"{'DEMO' if 'demo' in acct.server.lower() else 'LIVE'}")
         if not mt5.symbol_select(SYMBOL, True):
             raise RuntimeError(f"Symbol select failed: {SYMBOL}")
         self._mt5_ready = True

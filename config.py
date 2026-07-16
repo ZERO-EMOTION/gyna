@@ -20,6 +20,12 @@ VERSION = "1.1.0"
 MT5_LOGIN    = int(os.getenv("MT5_LOGIN", 0))
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER   = os.getenv("MT5_SERVER", "")
+# Optional: dedicated terminal64.exe for this bot. STRONGLY recommended when
+# another EA trades a DIFFERENT account on the main terminal — logging in via
+# the Python API would switch that terminal's account and kill the other
+# EA's session. Point this at a portable copy to fully isolate Gyna.
+MT5_TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "")
+MT5_PORTABLE      = os.getenv("MT5_PORTABLE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # ── LLM ───────────────────────────────────────────────────────────────────
 # Provider chain: the allocator tries LLM_PROVIDER first, then falls through
