@@ -51,6 +51,7 @@ class TradeMemory:
                 outcome       TEXT DEFAULT 'open', -- win | loss | be | open
                 mt5_ticket    INTEGER,          -- broker ticket number
                 style         TEXT,             -- scalper | runner
+                brain_p_win   REAL,             -- GynaBrain P(win) at entry
                 reflection    TEXT,             -- added by weekly reflection engine
                 closed_at     TEXT              -- timestamp when position closed
             );
@@ -93,6 +94,7 @@ class TradeMemory:
             "macd_hist":    "REAL",
             "atr":          "REAL",
             "style":        "TEXT",
+            "brain_p_win":  "REAL",
         }
         for col, dtype in new_cols.items():
             if col not in existing:
@@ -111,8 +113,8 @@ class TradeMemory:
                 rationale, regime, session,
                 rsi, macd_hist, bb_position, hma_trend, atr, hhll_bias,
                 confidence, key_risk, risk_tier, risk_pct, outcome, mt5_ticket,
-                style
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                style, brain_p_win
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             now,
             data.get("symbol", "BTCUSD"),
@@ -139,6 +141,7 @@ class TradeMemory:
             data.get("outcome", "open"),
             data.get("mt5_ticket"),
             data.get("style"),
+            data.get("brain_p_win"),
         ))
         self.conn.commit()
         return cur.lastrowid

@@ -48,6 +48,7 @@ from post_trade_analytics import (
 from memory.trade_log import TradeMemory
 from reflection_engine import ReflectionEngine
 from telegram_notifier import TelegramNotifier
+from learning_brain import GynaBrain, featurize as brain_featurize
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,6 +105,9 @@ class GynaSystemOrchestrator:
         self.risk        = RiskEngine()
         self.reflection  = ReflectionEngine(self.memory, self.allocator)
         self.notifier    = TelegramNotifier()
+        # GynaBrain — actual ML: weights update after every closed trade.
+        # Lives in the instance folder, so each symbol has its own brain.
+        self.brain       = GynaBrain()
 
         # ── MT5 bridge (lazy — initialized in rehydration) ─────────────────
         self._mt5_ready  = False
@@ -530,6 +534,16 @@ class GynaSystemOrchestrator:
                     ):
                         log.warning(f"[STEALTH] {ticket} not found in trade memory")
 
+                    # GynaBrain LEARNS: one gradient step from this outcome
+                    if pos.get("brain_features"):
+                        try:
+                            import json as _json
+                            self.brain.update(
+                                _json.loads(pos["brain_features"]),
+                                won=not is_loss)
+                        except Exception as e:
+                            log.warning(f"[BRAIN] Learn step failed: {e}")
+
                     # Feed the post-trade analytics ledger
                     tel = self.telemetry.current_metrics()
                     self.state_db.record_closed_trade(
@@ -663,6 +677,18 @@ class GynaSystemOrchestrator:
             log.warning("[TOXIC] State signature in blocklist — 50% aggression penalty")
             toxicity_scalar = 0.50
 
+        # ── GynaBrain: learned P(win) for THIS setup ───────────────────────
+        brain_p, brain_conf = self.brain.predict(masked)
+        log.info(f"[BRAIN] p_win={brain_p:.3f} confidence={brain_conf:.2f} "
+                 f"(updates={self.brain.n_updates})")
+        # Hard veto is a safety FILTER (mature brain only) — obeys the toggle
+        if SAFETY_FILTERS_ENABLED and self.brain.should_veto(brain_p):
+            log.warning(f"[BRAIN] VETO — learned P(win) {brain_p:.2f} < 0.30 "
+                        f"after {self.brain.n_updates} observed outcomes")
+            return
+        # Sizing modulation is core intelligence — always on
+        brain_scalar = self.brain.aggression_scalar(brain_p, brain_conf)
+
         # ── Claude allocation ──────────────────────────────────────────────
         recent_losses  = self.memory.get_recent_losses(RECENT_LOSSES_N)
         try:
@@ -672,7 +698,9 @@ class GynaSystemOrchestrator:
                 reflections=self.reflection.recent_lessons(),
             )
             allocation["aggression_multiplier"] = round(
-                allocation["aggression_multiplier"] * toxicity_scalar, 3)
+                min(allocation["aggression_multiplier"] * toxicity_scalar
+                    * brain_scalar,
+                    float(masked.get("edge_quality_score", 1.0))), 3)
         except Exception as e:
             log.warning(f"[ALLOC] Exception: {e} — local fallback")
             edge_score = float(masked.get("edge_quality_score", 0.3))
@@ -725,6 +753,11 @@ class GynaSystemOrchestrator:
         order_type = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
         price      = (mt5.symbol_info_tick(SYMBOL).ask if direction == 1
                       else mt5.symbol_info_tick(SYMBOL).bid)
+
+        # Entry feature vector — persisted with the position so the brain
+        # can learn from the outcome even across a crash/restart
+        import json as _json
+        brain_features_json = _json.dumps(brain_featurize(masked).tolist())
 
         # P1: capture both wall-clock (for DB/logs) and perf_counter (for latency)
         t_sent_wall = time.time()
@@ -815,6 +848,7 @@ class GynaSystemOrchestrator:
             "execution_profile":   allocation.get("execution_profile"),
             "entry_spread_points": float(sym_info.spread),
             "style":               style,
+            "brain_features":      brain_features_json,
             "timestamp_opened":    t_sent_wall,
         }
         self.state_db.register_stealth_position(ticket, pos_details)
@@ -848,6 +882,7 @@ class GynaSystemOrchestrator:
             "risk_pct":     auth.get("risk_pct"),
             "mt5_ticket":   ticket,
             "style":        style,
+            "brain_p_win":  brain_p,
             "outcome":      "open",
         })
 

@@ -59,7 +59,8 @@ class StateManager:
                 execution_profile   TEXT,
                 entry_spread_points REAL,
                 state_signature     TEXT,
-                style               TEXT
+                style               TEXT,
+                brain_features      TEXT
             );""",
             """CREATE TABLE IF NOT EXISTS telemetry_ledger (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,7 +96,8 @@ class StateManager:
                                ("execution_profile", "TEXT"),
                                ("entry_spread_points", "REAL"),
                                ("state_signature", "TEXT"),
-                               ("style", "TEXT")):
+                               ("style", "TEXT"),
+                               ("brain_features", "TEXT")):
                 if existing and col not in existing:
                     conn.execute(f"ALTER TABLE active_stealth_positions "
                                  f"ADD COLUMN {col} {dtype}")
@@ -144,8 +146,8 @@ class StateManager:
                 "virtual_sl_points, virtual_tp_points, snapshot_hash, "
                 "timestamp_opened, operational_state, regime, session, "
                 "execution_profile, entry_spread_points, state_signature, "
-                "style) "
-                "VALUES (?,?,?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?);",
+                "style, brain_features) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'OPEN',?,?,?,?,?,?,?);",
                 (ticket_id, pos["symbol"], pos["direction"], pos["volume"],
                  pos["entry_price"], pos["virtual_sl_points"],
                  pos["virtual_tp_points"], pos["snapshot_hash"],
@@ -154,7 +156,8 @@ class StateManager:
                  pos.get("execution_profile"),
                  pos.get("entry_spread_points"),
                  pos.get("state_signature"),
-                 pos.get("style"))
+                 pos.get("style"),
+                 pos.get("brain_features"))
             )
             conn.commit()
 

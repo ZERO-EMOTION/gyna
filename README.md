@@ -45,6 +45,40 @@ weight automatically. The chosen style's risk envelope bounds Claude's SL/TP.
 - Toxic-state blocklist matches on a **quantized state signature** (recurring across bars), not the per-bar snapshot hash
 - 48/48 unit tests passing
 
+## GynaBrain — actual machine learning
+
+`learning_brain.py` is a real ML model whose **weights update after every
+closed trade** — online logistic regression with AdaGrad, written from
+scratch in numpy so every weight is inspectable (`brain.top_weights()`
+prints the model in plain English).
+
+- **Predicts P(win)** for every candidate signal from ~25 features (regime,
+  session, style, price action, momentum, fatigue, direction)
+- **Scales Claude's aggression** 0.6×–1.4× by that prediction (capped by the
+  edge score — the brain is a voice, never the authority)
+- **Learns at close**: the entry feature vector is persisted with the
+  position (crash-safe) and replayed as a gradient step when the outcome is
+  known. Win or loss literally rewires the model.
+- **Influence is earned**: confidence ramps 0→1 over its first 200 outcomes
+  — a day-one brain is mute. A mature brain (100+ outcomes) may hard-veto
+  setups it scores under 30% (that veto is a safety filter and obeys
+  `SAFETY_FILTERS`; the sizing modulation is core intelligence, always on).
+- **Per-symbol brains**: `memory/brain.json` in each instance folder —
+  the gold brain and the BTC brain never share weights.
+- **Pre-training**: `pretrain_brain.py` replays historical M1 bars through
+  the exact live pipeline, simulates each signal's virtual SL/TP outcome,
+  and trains the brain on thousands of labeled samples before live trade #1:
+  ```bash
+  cd instances\XAUUSD && python ..\..\pretrain_brain.py --bars 20000
+  ```
+- Every entry prediction is stored (`brain_p_win` in trade memory) so the
+  brain's calibration is auditable against reality.
+
+Deliberately a low-variance linear model: trading samples are few and
+noisy; a deep net here would memorize noise. When the ledger holds a few
+hundred real trades, upgrading the same interface to a richer model is a
+drop-in change.
+
 **How it learns (the loops that make it Gyna):**
 1. **Recent losses** are injected into every allocation prompt
 2. **Risk tiers** are earned from real WR/PF, never configured
