@@ -27,7 +27,7 @@ set SYM=%~2
 title GYNA-%SYM%
 cd /d "%~dp0instances\%SYM%"
 :loop
-python "%~dp0main.py"
+py -3 "%~dp0main.py"
 echo.
 echo [GYNA-%SYM%] Process exited — restarting in 10 seconds (close window to stop)...
 timeout /t 10 /nobreak >nul
