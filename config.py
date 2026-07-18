@@ -55,6 +55,7 @@ SYMBOL_PROFILES = {
         "feed_staleness_s":  60,
         "always_open":       True,   # 24/7 asset
         "closed_utc_hours":  [],     # no daily maintenance break
+        "magic":             20260101,  # Gyna-BTCUSD order signature
     },
     "XAUUSD": {
         "max_spread_points": 60,     # ~$0.60 — generous for ICM Raw gold
@@ -62,6 +63,7 @@ SYMBOL_PROFILES = {
         "feed_staleness_s":  30,
         "always_open":       False,  # weekends closed
         "closed_utc_hours":  [21],   # ICM daily maintenance window (approx)
+        "magic":             20260102,  # Gyna-XAUUSD order signature
     },
 }
 PROFILE = SYMBOL_PROFILES.get(SYMBOL, SYMBOL_PROFILES["BTCUSD"])

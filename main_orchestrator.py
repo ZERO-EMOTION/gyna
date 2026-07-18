@@ -83,6 +83,15 @@ MIN_COOLDOWN_S           = int(PROFILE["cooldown_s"])
 OPTIMISTIC_TTL_S         = 2.0     # max time for optimistic position to propagate
 BAR_REGISTRY_RETENTION_S = 86400  # 24hr bar registry pruning
 SYMBOL                   = SYMBOLS[0]   # from the instance .env
+GYNA_MAGIC               = int(PROFILE["magic"])   # ours vs manual/other EAs
+
+
+def _own_positions():
+    """Positions THIS bot owns — filtered by magic number so Gyna and
+    manual trading (or other EAs) can share one account without ever
+    touching each other's trades."""
+    return [p for p in (mt5.positions_get(symbol=SYMBOL) or [])
+            if int(getattr(p, "magic", 0)) == GYNA_MAGIC]
 
 
 # ── Environment validation ────────────────────────────────────────────────
@@ -350,7 +359,7 @@ class GynaSystemOrchestrator:
                 "timestamp_opened": float(p.time),
                 "is_optimistic":   False,
             }
-            for p in (mt5.positions_get(symbol=SYMBOL) or [])
+            for p in _own_positions()
         }
 
         resolved: Dict[int, Any] = {}
@@ -429,7 +438,7 @@ class GynaSystemOrchestrator:
                 "entry_price": float(p.price_open),
                 "timestamp_opened": float(p.time),
             }
-            for p in (mt5.positions_get(symbol=SYMBOL) or [])
+            for p in _own_positions()
         }
         self.cached_positions = terminal_pos
 
@@ -521,6 +530,7 @@ class GynaSystemOrchestrator:
                     "position":     ticket,
                     "price":        close_price,
                     "deviation":    15,
+                    "magic":        GYNA_MAGIC,
                     "type_filling": self._get_filling_mode(SYMBOL),
                     "type_time":    mt5.ORDER_TIME_GTC,
                 })
@@ -817,6 +827,7 @@ class GynaSystemOrchestrator:
             "deviation":    20,
             "sl":           round(broker_sl, 2),
             "tp":           0.0,
+            "magic":        GYNA_MAGIC,
             "type_filling": filling,
             "type_time":    mt5.ORDER_TIME_GTC,
             "comment":      f"Gyna:{snap.get('snapshot_hash','')[:8]}",
