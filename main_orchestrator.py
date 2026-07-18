@@ -61,6 +61,7 @@ from memory.trade_log import TradeMemory
 from reflection_engine import ReflectionEngine
 from telegram_notifier import TelegramNotifier
 from learning_brain import GynaBrain, featurize as brain_featurize
+from shadow_learner import ShadowLearner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,6 +121,10 @@ class GynaSystemOrchestrator:
         # GynaBrain — actual ML: weights update after every closed trade.
         # Lives in the instance folder, so each symbol has its own brain.
         self.brain       = GynaBrain()
+        # Shadow learner — hindsight-labels every SKIPPED signal and feeds
+        # it to the brain at reduced weight. "Skipping just means we haven't
+        # figured out BUY or SELL yet — look back and figure it out."
+        self.shadow      = ShadowLearner(STATE_DB_PATH, self.brain)
 
         # ── MT5 bridge (lazy — initialized in rehydration) ─────────────────
         self._mt5_ready  = False
@@ -703,10 +708,12 @@ class GynaSystemOrchestrator:
         brain_p, brain_conf = self.brain.predict(masked)
         log.info(f"[BRAIN] p_win={brain_p:.3f} confidence={brain_conf:.2f} "
                  f"(updates={self.brain.n_updates})")
+        brain_vec = brain_featurize(masked)
         # Hard veto is a safety FILTER (mature brain only) — obeys the toggle
         if SAFETY_FILTERS_ENABLED and self.brain.should_veto(brain_p):
             log.warning(f"[BRAIN] VETO — learned P(win) {brain_p:.2f} < 0.30 "
                         f"after {self.brain.n_updates} observed outcomes")
+            self.shadow.record(masked, brain_vec, "brain_veto")
             return
         # Sizing modulation is core intelligence — always on
         brain_scalar = self.brain.aggression_scalar(brain_p, brain_conf)
@@ -740,6 +747,7 @@ class GynaSystemOrchestrator:
             }
 
         if allocation.get("execution_profile") == "FLAT":
+            self.shadow.record(masked, brain_vec, "llm_flat")
             return
 
         # ── P4: rebuild daily loss before risk check ───────────────────────
@@ -768,6 +776,8 @@ class GynaSystemOrchestrator:
 
         if auth["status"] != "APPROVED":
             log.info(f"[RISK] Rejected: {auth['status']}")
+            self.shadow.record(masked, brain_vec,
+                               f"risk_{auth['status'].lower()}")
             return
 
         # ── Execute ────────────────────────────────────────────────────────
@@ -779,7 +789,7 @@ class GynaSystemOrchestrator:
         # Entry feature vector — persisted with the position so the brain
         # can learn from the outcome even across a crash/restart
         import json as _json
-        brain_features_json = _json.dumps(brain_featurize(masked).tolist())
+        brain_features_json = _json.dumps(brain_vec.tolist())
 
         # P1: capture both wall-clock (for DB/logs) and perf_counter (for latency)
         t_sent_wall = time.time()
@@ -823,6 +833,7 @@ class GynaSystemOrchestrator:
                 {**auth, "timestamp_sent": t_sent_wall,
                  "timestamp_sent_perf": t_sent_perf},
                 {"execution_successful": False})
+            self.shadow.record(masked, brain_vec, "order_failed")
             return
 
         ticket     = int(result.order)
@@ -923,6 +934,22 @@ class GynaSystemOrchestrator:
             f"Tier {auth.get('risk_tier')} "
             f"risk {auth.get('risk_pct', 0) * 100:.2f}%")
 
+    # ── Shadow resolution (hindsight labeling of skipped signals) ──────────
+
+    def _bars_since(self, since_ts: float):
+        """M1 bars from since_ts to now, for shadow outcome simulation."""
+        try:
+            from datetime import datetime, timezone
+            import pandas as pd
+            frm = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+            to  = datetime.now(timezone.utc)
+            rates = mt5.copy_rates_range(SYMBOL, mt5.TIMEFRAME_M1, frm, to)
+            if rates is None or len(rates) == 0:
+                return None
+            return pd.DataFrame(rates)
+        except Exception:
+            return None
+
     # ── Filling mode ───────────────────────────────────────────────────────
 
     def _get_filling_mode(self, symbol: str) -> int:
@@ -985,6 +1012,9 @@ class GynaSystemOrchestrator:
                         if elapsed >= bar_interval:
                             log.info("[LOOP] BAR CYCLE FIRING NOW")
                             self.process_bar_allocation_cycle()
+                            # Hindsight-label skipped signals (learn from
+                            # roads not taken) — runs even while in-position
+                            self.shadow.resolve_due(self._bars_since)
                             self.last_allocation_ts = time.time()
 
                         consecutive_frame_errors = 0
