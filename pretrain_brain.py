@@ -29,7 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
 
-from config import SYMBOL
+from config import (SYMBOL, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER,
+                    MT5_TERMINAL_PATH, MT5_PORTABLE)
 from feature_engine import FeatureEngine
 from edge_engine import EdgeEngine
 from learning_brain import GynaBrain, featurize
@@ -41,7 +42,12 @@ COOLDOWN_BARS = 3      # mirror the live 3-min cooldown
 
 def load_mt5_history(bars: int) -> pd.DataFrame:
     import MetaTrader5 as mt5
-    if not mt5.initialize():
+    # Same credentialed, dedicated-terminal login as the live bot — a bare
+    # initialize() could wake the MAIN terminal (and any live EA on it)
+    kwargs = dict(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER)
+    ok = (mt5.initialize(MT5_TERMINAL_PATH, portable=MT5_PORTABLE, **kwargs)
+          if MT5_TERMINAL_PATH else mt5.initialize(**kwargs))
+    if not ok:
         raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
     rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M1, 0, bars)
     mt5.shutdown()
