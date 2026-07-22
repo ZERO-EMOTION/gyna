@@ -490,7 +490,42 @@ class GynaSystemOrchestrator:
 
         for ticket, pos in list(db_positions.items()):
             if ticket not in self.cached_positions:
-                log.info(f"[TELEMETRY] Ticket {ticket} closed out-of-band — purging")
+                # Closed out-of-band (emergency broker SL, manual close).
+                # The lesson must not be lost: settle from broker history,
+                # close the memory row, and teach the brain.
+                log.info(f"[TELEMETRY] Ticket {ticket} closed out-of-band — settling")
+                realized = self._realized_pnl_for_position(ticket, retries=1)
+                if realized is not None:
+                    is_loss = realized < 0
+                    self.consecutive_losses = (self.consecutive_losses + 1
+                                               if is_loss else 0)
+                    self.state_db.save_system_context(
+                        self.consecutive_losses, self.daily_loss_pct)
+                    self.memory.close_trade_by_ticket(
+                        mt5_ticket=ticket, exit_price=0.0, pnl_pips=0.0,
+                        pnl_usd=realized,
+                        outcome="loss" if is_loss else "win")
+                    if pos.get("brain_features"):
+                        try:
+                            import json as _json
+                            self.brain.update(
+                                _json.loads(pos["brain_features"]),
+                                won=not is_loss)
+                        except Exception as e:
+                            log.warning(f"[BRAIN] OOB learn failed: {e}")
+                    tel = self.telemetry.current_metrics()
+                    self.state_db.record_closed_trade(
+                        ticket, pos, realized_pnl_points=0.0,
+                        avg_latency_ms=tel["rolling_avg_latency_ms"],
+                        avg_slippage_points=tel["rolling_avg_slippage_points"],
+                        final_eqd=tel["execution_quality_degradation"])
+                    self.notifier.send(
+                        f"Gyna {SYMBOL} #{ticket} closed out-of-band "
+                        f"(emergency SL/manual): ${realized:+.2f}")
+                    log.info(f"[TELEMETRY] {ticket} settled out-of-band: "
+                             f"${realized:+.2f}")
+                else:
+                    self.memory.mark_trade_orphaned(ticket)
                 self.state_db.remove_stealth_position(ticket)
                 continue
 
