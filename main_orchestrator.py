@@ -80,6 +80,7 @@ HEARTBEAT_INTERVAL       = 1.0     # 1Hz terminal watchdog
 MAX_FEED_STALENESS_S     = float(PROFILE["feed_staleness_s"])
 MAX_SPREAD_POINTS        = int(PROFILE["max_spread_points"])
 MIN_COOLDOWN_S           = int(PROFILE["cooldown_s"])
+STREAK_RESET_S           = 2 * 3600   # 3-loss FLAT veto auto-resets after 2h flat (or a restart)
 OPTIMISTIC_TTL_S         = 2.0     # max time for optimistic position to propagate
 BAR_REGISTRY_RETENTION_S = 86400  # 24hr bar registry pruning
 SYMBOL                   = SYMBOLS[0]   # from the instance .env
@@ -641,6 +642,26 @@ class GynaSystemOrchestrator:
 
     def process_bar_allocation_cycle(self) -> None:
         now = time.time()
+
+        # ── Loss-streak cooldown auto-reset ────────────────────────────────
+        # The 3-consecutive-loss FLAT veto is a COOL-OFF, not a kill switch.
+        # It used to require a WIN to reset — but the veto forbids the very
+        # trade that could produce a win, so a bad streak deadlocked the bot
+        # permanently (frozen since the 3rd loss). Now: after STREAK_RESET_S
+        # of no new entry (also true right after any restart, since
+        # last_entry_ts starts at 0), the streak decays back to 0 so Gyna
+        # takes a fresh probe trade. Risk is still tiny (Tier 1) and the
+        # brain/shadow loops keep learning either way.
+        if (self.consecutive_losses >= 3
+                and now - self.last_entry_ts >= STREAK_RESET_S):
+            log.warning(f"[STREAK] Loss-streak cooldown elapsed "
+                        f"({self.consecutive_losses} losses, "
+                        f"{(now - self.last_entry_ts)/3600:.1f}h flat) — "
+                        f"resetting to 0, resuming trading")
+            self.consecutive_losses = 0
+            self.state_db.save_system_context(0, self.daily_loss_pct)
+            self.notifier.send(f"Gyna {SYMBOL}: loss-streak cooldown elapsed "
+                               f"— resuming trading (Tier 1 probe).")
 
         # ── Entry guards ───────────────────────────────────────────────────
         log.info(f"[BAR] positions={len(self.cached_positions)} max={MAX_OPEN_POSITIONS}")
