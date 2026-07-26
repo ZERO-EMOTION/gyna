@@ -292,22 +292,29 @@ class GynaSystemOrchestrator:
         deals = mt5.history_deals_get(day_start, now)
         if deals is None:
             return
+        # GYNA'S OWN deals only — filter by magic so a human trading the same
+        # account manually (or another EA) can't trip Gyna's daily breaker.
+        # The breaker means "stop GYNA after SHE loses 5% today", not "after
+        # the account had a bad day".
         realized = sum(
             float(getattr(d, "profit", 0.0)) +
             float(getattr(d, "commission", 0.0)) +
             float(getattr(d, "swap", 0.0)) +
             float(getattr(d, "fee", 0.0))
             for d in deals
-            if getattr(d, "entry", -1) == mt5.DEAL_ENTRY_OUT   # closed-leg deals only
+            if getattr(d, "entry", -1) == mt5.DEAL_ENTRY_OUT
+            and int(getattr(d, "magic", 0)) == GYNA_MAGIC
         )
         self.daily_realized_pnl = realized
 
         account = mt5.account_info()
         if account and self.day_start_equity > 0.0:
             realized_loss_pct = max(0.0, -realized / self.day_start_equity)
-            # Include floating loss for conservative breaker
-            floating_dd_pct = max(0.0,
-                (self.day_start_equity - float(account.equity)) / self.day_start_equity)
+            # Floating loss on GYNA'S OWN open positions only (not the
+            # account's total floating, which would include manual trades).
+            own_floating = sum(float(getattr(p, "profit", 0.0))
+                               for p in _own_positions())
+            floating_dd_pct = max(0.0, -own_floating / self.day_start_equity)
             self.daily_loss_pct = max(realized_loss_pct, floating_dd_pct)
 
             if self.daily_loss_pct >= MAX_DAILY_LOSS:
