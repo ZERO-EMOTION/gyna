@@ -126,7 +126,8 @@ class GynaSystemOrchestrator:
         self.edge        = EdgeEngine(fatigue_threshold_bars=48)
         self.allocator   = ClaudeAllocator()
         self.risk        = RiskEngine()
-        self.reflection  = ReflectionEngine(self.memory, self.allocator)
+        self.reflection  = ReflectionEngine(self.memory, self.allocator,
+                                            state_db_path=STATE_DB_PATH)
         self.notifier    = TelegramNotifier()
         # GynaBrain — actual ML: weights update after every closed trade.
         # Lives in the instance folder, so each symbol has its own brain.

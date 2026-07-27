@@ -39,9 +39,10 @@ Maximum 250 words. Plain text, no markdown headers."""
 
 
 class ReflectionEngine:
-    def __init__(self, memory, allocator):
-        self.memory    = memory
-        self.allocator = allocator
+    def __init__(self, memory, allocator, state_db_path: Optional[str] = None):
+        self.memory        = memory
+        self.allocator     = allocator
+        self.state_db_path = state_db_path   # for directional-calibration note
 
     # ── Scheduling ─────────────────────────────────────────────────────────
 
@@ -98,6 +99,18 @@ class ReflectionEngine:
                 f"{t.get('regime')} | {t.get('session')} | "
                 f"${(t['pnl_usd'] or 0):+.2f} | "
                 f"{str(t.get('rationale') or '')[:100]}")
+
+        # Read-only directional-calibration mirror: flag any state where one
+        # side (BUY/SELL) is reliably beating the other — the signal for the
+        # losing side is likely inverted there.
+        if self.state_db_path:
+            try:
+                from directional_calibration import reflection_note
+                note = reflection_note(self.state_db_path)
+                if note:
+                    lines += ["", note]
+            except Exception as e:
+                log.warning(f"Calibration note skipped: {e}")
 
         content = self.allocator.complete(
             REFLECTION_SYSTEM_PROMPT, "\n".join(lines))
