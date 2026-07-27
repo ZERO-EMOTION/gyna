@@ -348,8 +348,34 @@ class GynaSystemOrchestrator:
                          f"{sorted(self.dynamic_kill_hours) or 'none'}")
         except Exception as e:
             log.warning(f"[LEARN] Refresh skipped: {e}")
+        self._check_flip_ready()
         self._learning_refresh_date = (
             datetime.now(timezone.utc).date().isoformat())
+
+    def _check_flip_ready(self) -> None:
+        """Daily: alert once when a state clears the full flip evidence bar
+        (samples, win-rate split, time-span, week-diversity, expectancy).
+        Never flips a trade — this is the reminder JP asked for."""
+        try:
+            from directional_calibration import flip_ready_report
+            ready = flip_ready_report(STATE_DB_PATH)
+            if not ready:
+                return
+            alerted = set(self.state_db.get_meta("flip_alerted", []))
+            for c in ready:
+                if c["key"] in alerted:
+                    continue
+                msg = (f"[FLIP-READY] {SYMBOL} {c['key']}: "
+                       f"{c['winning_direction']} {c['win_wr']:.0%} "
+                       f"vs {c['losing_direction']} {c['lose_wr']:.0%} "
+                       f"({c['buy_n']}B/{c['sell_n']}S, {c['span_days']:.0f}d "
+                       f"/{c['weeks']}wk). {c['remaining']}")
+                log.warning(msg)
+                self.notifier.send("GYNA " + msg)
+                alerted.add(c["key"])
+            self.state_db.set_meta("flip_alerted", sorted(alerted))
+        except Exception as e:
+            log.warning(f"[FLIP] Check skipped: {e}")
 
     # ── Position cache ─────────────────────────────────────────────────────
 

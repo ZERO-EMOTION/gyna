@@ -107,3 +107,61 @@ def test_reflection_note_populated_when_flagged(db):
         t += 1; _add_taken(db, t, 1, -30.0)
     note = reflection_note(db.db_path)
     assert "DIRECTIONAL CALIBRATION" in note and "inverted" in note
+
+
+# ── Flip-readiness (the full evidence bar) ─────────────────────────────────
+
+def _add_taken_at(db, ticket, direction, pnl, ts, **kw):
+    """Record a closed trade with an explicit timestamp_closed."""
+    import sqlite3
+    db.record_closed_trade(ticket, _pos(direction, **kw),
+                           realized_pnl_points=pnl, avg_latency_ms=50.0,
+                           avg_slippage_points=1.0, final_eqd=0.1)
+    conn = sqlite3.connect(db.db_path)
+    conn.execute("UPDATE closed_trades_ledger SET timestamp_closed=? WHERE ticket_id=?",
+                 (ts, ticket))
+    conn.commit(); conn.close()
+
+
+def test_flip_ready_all_criteria_met(db):
+    from directional_calibration import flip_ready_report
+    import datetime
+    base = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc).timestamp()
+    t = 0
+    # 45 SELL wins + 45 BUY losses, spread across 5 weeks (>21d, >=3 weeks)
+    for i in range(45):
+        t += 1; _add_taken_at(db, t, -1, +25.0, base + i * 3 * 86400)  # SELL win
+    for i in range(45):
+        t += 1; _add_taken_at(db, t, 1, -25.0, base + i * 3 * 86400)   # BUY loss
+    ready = flip_ready_report(db.db_path)
+    assert len(ready) == 1
+    c = ready[0]
+    assert c["winning_direction"] == "SELL" and c["losing_direction"] == "BUY"
+    assert c["buy_n"] >= 40 and c["sell_n"] >= 40
+    assert c["span_days"] >= 21 and c["weeks"] >= 3
+    assert c["win_expectancy_pts"] > 0
+
+
+def test_flip_not_ready_when_span_too_short(db):
+    from directional_calibration import flip_ready_report
+    import datetime
+    base = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc).timestamp()
+    t = 0
+    # Enough samples + win split, but all within 2 days -> regime-poor
+    for i in range(45):
+        t += 1; _add_taken_at(db, t, -1, +25.0, base + i * 60)
+    for i in range(45):
+        t += 1; _add_taken_at(db, t, 1, -25.0, base + i * 60)
+    assert flip_ready_report(db.db_path) == []
+
+
+def test_flip_not_ready_below_sample_floor(db):
+    from directional_calibration import flip_ready_report
+    import datetime
+    base = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc).timestamp()
+    t = 0
+    for i in range(20):   # only 20/side, below the 40 floor
+        t += 1; _add_taken_at(db, t, -1, +25.0, base + i * 2 * 86400)
+    for i in range(20):
+        t += 1; _add_taken_at(db, t, 1, -25.0, base + i * 2 * 86400)
+    assert flip_ready_report(db.db_path) == []

@@ -134,6 +134,25 @@ class StateManager:
                 return json.loads(row[0])
         return {"consecutive_losses": 0, "daily_realized_loss_pct": 0.0}
 
+    # ── Generic metadata (arbitrary JSON keyed values) ─────────────────────
+
+    def get_meta(self, key: str, default: Any = None) -> Any:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT value_json FROM system_metadata WHERE key=?;",
+                (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def set_meta(self, key: str, value: Any) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO system_metadata (key, value_json, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, "
+                "updated_at=CURRENT_TIMESTAMP;",
+                (key, json.dumps(value)))
+            conn.commit()
+
     # ── Stealth positions ──────────────────────────────────────────────────
 
     def register_stealth_position(self, ticket_id: int,
